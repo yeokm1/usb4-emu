@@ -1,0 +1,50 @@
+; SPDX-License-Identifier: GPL-2.0-only
+; Copyright (c) 2026 usb4-emu contributors
+; THROWAWAY EXPERIMENT: reenum.sys as the function driver of the usb4-host
+; (PCI\VEN_1B36&DEV_00F4) on Windows 98 SE. Stands in for a CM driver.
+[Version]
+Signature="$CHICAGO$"
+Class=System
+ClassGUID={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%Mfg%
+DriverVer=10/14/2026,0.0.0.1
+
+[Manufacturer]
+%Mfg%=Models
+
+[Models]
+%Desc%=Inst,PCI\VEN_1B36&DEV_00F4
+
+[DestinationDirs]
+DefaultDestDir=10,System32\Drivers
+
+[Inst]
+CopyFiles=Inst.Copy
+AddReg=Inst.AddReg
+
+[Inst.HW]
+AddReg=Inst.HW.AddReg
+
+[Inst.Copy]
+reenum.sys
+
+[Inst.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,reenum.sys
+
+[Inst.HW.AddReg]
+; 2 = CONFIGMG path (see reenum.c). Bridge at 00:05.0.
+HKR,,ReenumMode,0x10001,2
+HKR,,BridgeBus,0x10001,0
+HKR,,BridgeDev,0x10001,5
+
+[SourceDisksNames]
+1=%Disk%,,,
+
+[SourceDisksFiles]
+reenum.sys=1
+
+[Strings]
+Mfg="usb4-emu experiment"
+Desc="USB4 host (reenum experiment)"
+Disk="reenum test disk"

@@ -1,0 +1,32 @@
+usb4-emu
+Copyright (c) 2026 Yeo Kheng Meng
+
+This project is licensed under the GNU General Public License, version 2 only
+(SPDX-License-Identifier: GPL-2.0-only). See LICENSE.
+
+Until 2026-10-15 the project was MIT-licensed. The maintainer, who holds the
+copyright in all of it, relicensed every file this project wrote to
+GPL-2.0-only on that date.
+
+This file lists material incorporated from other projects. Each incorporated
+or adapted file also keeps the original copyright lines and licence notice in
+its own header. The rules for adding to this list are in AGENTS.md,
+"Licence rules".
+
+Linux drivers/thunderbolt (GPL-2.0-only)
+  Pinned commit: 24a19b953e2a3d0ea5a8c4951a0ab8f32720c907 (docs/REFERENCES.md)
+  Files adapted from it: none yet. List each one as
+    <file in this repo>  <-  <Linux source file(s)>
+
+FreeBSD sys/dev/thunderbolt (BSD-2-Clause)
+  Pinned commit: ac64294143ffea63c7dedf9a1859f88342bd998a
+  Files adapted from it: none. Register offsets were cross-checked against
+  nhi_reg.h and tbcfg_reg.h; no code or text was taken.
+
+Intel tbtools (MIT)
+  Pinned commit: aa0b1be590443d7074e799ebd6c72e308c5bdd02
+  Files generated or adapted from it: none. Field positions were
+  cross-checked against registers.json; no tables were generated from it.
+
+Upstream QEMU files changed by the patch series in src/patches/ keep their own
+licences and notices and are not listed here.

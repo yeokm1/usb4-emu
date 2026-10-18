@@ -1,0 +1,8 @@
+docs/references/
+toolchain/
+vms/
+src/qemu/
+src/*.log
+src/wt-*/
+tools/third-party/
+tools/reenum-test/out/

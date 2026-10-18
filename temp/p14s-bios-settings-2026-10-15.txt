@@ -1,0 +1,12 @@
+P14s Gen 1 capture session 2026-10-15 (maintainer)
+BIOS version: N2XET46W (1.36), date 2026-06-02
+Thunderbolt security level: User Authorization
+Boot: legacy/CSM for Windows 98 and Linux runs (Linux capture.log records "legacy/CSM boot")
+Device: ORICO AAGM2-U4 (ASMedia ASM2464PD) with SK hynix P31 NVMe
+Linux runs (installed Kubuntu, kernel 7.0.0-38, boot tracing options in /etc/default/grub):
+  p14s-orico_assistOFF_prebootOFF  - Assist off, pre-boot off, ORICO at power-on
+  p14s-orico_assistOFF_prebootON   - Assist off, pre-boot on,  ORICO at power-on
+  p14s-orico_assistON              - Assist on,  pre-boot off, ORICO at power-on (NHI hidden throughout)
+  p14s-orico_assistONprebootON     - Assist on,  pre-boot on,  ORICO at power-on
+Windows 98 runs (MS-DOS mode, CAPTURE <folder> N), folder = A<assist 0/1>P<preboot 0/1>_<OR = ORICO at power-on | NO = nothing attached>:
+  A0P0_OR A0P0_NO A0P1_OR A0P1_NO A1P0_OR A1P0_NO A1P1_OR A1P1_NO

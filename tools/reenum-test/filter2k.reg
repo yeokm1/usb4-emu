@@ -1,0 +1,17 @@
+REGEDIT4
+
+; Mechanism A on Windows 2000: reenum.sys as a class upper filter of the
+; System class. It attaches only to PCI-to-PCI bridges (compatible ID
+; PCI\CC_0604) and to the usb4-host; everything else is passed over in
+; AddDevice. ReenumMode 1 (IoInvalidateDeviceRelations) is the default.
+; Start must be 0 (boot): the PCI bus and other boot-critical devices are
+; System class, and a demand-start (3) class filter keeps them from
+; starting (STOP 0x7B INACCESSIBLE_BOOT_DEVICE, seen on the test VM).
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\reenum]
+"Type"=dword:00000001
+"Start"=dword:00000000
+"ErrorControl"=dword:00000001
+"ImagePath"="System32\\drivers\\reenum.sys"
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4D36E97D-E325-11CE-BFC1-08002BE10318}]
+"UpperFilters"=hex(7):72,65,65,6e,75,6d,00,00

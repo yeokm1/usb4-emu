@@ -1,0 +1,12 @@
+REGEDIT4
+
+; Mechanism A, variant 2 on Windows 98 SE: make NTKERN the bridge's device
+; loader so reenum.sys is loaded on the bridge devnode (PCI.VXD remains
+; the enumerator of its secondary bus). ReenumMode 1 is the filter default.
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\System\0028]
+"DevLoader"="*ntkern"
+"NTMPDriver"="reenum.sys"
+
+; the host-role instance only logs while A is under test
+[HKEY_LOCAL_MACHINE\Enum\PCI\VEN_1B36&DEV_00F4&SUBSYS_11001AF4&REV_01\BUS_00&DEV_04&FUNC_00]
+"ReenumMode"=dword:00000000

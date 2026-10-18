@@ -1,0 +1,6 @@
+REGEDIT4
+
+; Mechanism A, variant 1 on Windows 98 SE: an UpperFilters value on the
+; PCI-to-PCI bridge's hardware key (its driver key has no DevLoader).
+[HKEY_LOCAL_MACHINE\Enum\PCI\VEN_1B36&DEV_0001&SUBSYS_00000000&REV_00\BUS_00&DEV_05&FUNC_00]
+"UpperFilters"="reenum.sys"

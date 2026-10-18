@@ -1,0 +1,33 @@
+
+Modules using memory below 1 MB:
+
+  Name           Total           Conventional       Upper Memory
+  --------  ----------------   ----------------   ----------------
+  MSDOS       16,400   (16K)     16,400   (16K)          0    (0K)
+  HIMEM        1,168    (1K)      1,168    (1K)          0    (0K)
+  DBLBUFF      2,976    (3K)      2,976    (3K)          0    (0K)
+  IFSHLP       2,864    (3K)      2,864    (3K)          0    (0K)
+  COMMAND      7,424    (7K)      7,424    (7K)          0    (0K)
+  WIN          2,288    (2K)      2,288    (2K)          0    (0K)
+  DOSKEY       9,840   (10K)      9,840   (10K)          0    (0K)
+  COMMAND      7,360    (7K)      7,360    (7K)          0    (0K)
+  CTMOUSE      3,104    (3K)      3,104    (3K)          0    (0K)
+  DOSIDLE      2,512    (2K)      2,512    (2K)          0    (0K)
+  Free       591,040  (577K)    591,040  (577K)          0    (0K)
+
+Memory Summary:
+
+  Type of Memory       Total         Used          Free
+  ----------------  -----------   -----------   -----------
+  Conventional          647,168        56,128       591,040
+  Upper                       0             0             0
+  Reserved                    0             0             0
+  Extended (XMS)    1,440,387,0        69,632   1,440,317,4
+  ----------------  -----------   -----------   -----------
+  Total memory      1,441,034,2       125,760   1,440,908,4
+
+  Total under 1 MB      647,168        56,128       591,040
+
+  Largest executable program size         590,992   (577K)
+  Largest free upper memory block               0     (0K)
+  MS-DOS is resident in the high memory area.

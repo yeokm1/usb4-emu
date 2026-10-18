@@ -1,0 +1,8 @@
+*.BAT text eol=crlf
+*.bat text eol=crlf
+*.SCR text eol=crlf
+*.TXT text eol=crlf
+*.ASM text eol=crlf
+*.COM binary
+*.sh text eol=lf
+*.py text eol=lf
