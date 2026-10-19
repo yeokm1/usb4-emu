@@ -2,12 +2,8 @@
 
 A Thunderbolt 3 / USB4 host emulator for QEMU. An unmodified OS's connection manager (CM)
 enumerates the emulated routers and brings up a PCIe tunnel to an NVMe drive. It exists so
-the xhci98 project can develop USB4/Thunderbolt drivers for Windows 98 through Windows 7
-without real hardware. 
-
-This project was developed to support the creation of
-[xhci98](https://github.com/yeokm1/xhci98), xHCI and USB3/4/TB drivers for Windows 98 through
-Windows 7.
+[xhci98](https://github.com/yeokm1/xhci98) can develop USB4/Thunderbolt drivers for
+Windows 98 through Windows 7 without real hardware.
 
 ![Windows 11 Device Manager showing the emulated USB4 host router, an ASMedia 246x device router and tunnelled PCIe devices including two QEMU NVMe drives](images/usb4-emu-win11-devmgr.png)
 
@@ -17,65 +13,52 @@ behind it, including QEMU NVMe drives, a NIC and an xHCI controller.*
 
 ## Status (2026-10-16)
 
-Working with the **`usb4-generic` profile and the Windows 11 built-in USB4 connection
-manager** (build 26300), with no third-party drivers:
+**Windows 11's built-in USB4 CM** (build 26300, `usb4-generic` profile, no third-party
+drivers):
 
-- Windows binds its in-box `Usb4HostRouter.sys` to the emulated host interface through
-  the ACPI `_OSC` grants, enumerates the host router and the device router ("USB4 Router
-  (1.0), QEMU - USB4 NVMe Enclosure"), reads the DROMs, bonds lanes, programs both PCIe
-  paths and enables them.
-- The model's tunnel evaluator sees the tunnel come up and hot-plugs QEMU's `nvme` behind
-  the tunnel root port. Windows shows "QEMU NVMe Ctrl" (serial `USB4EMU01`) as a disk
-  after a plain cold boot. It was formatted NTFS and a 64 MB file read back with a
-  matching SHA-256, after a reboot as well.
-- Hot unplug (`device_del` of the device router) removes the disk cleanly; re-plugging
-  (`device_add`) brings the same volume back.
-- Both USB4 ports are populated: each has its own device router, tunnel root port and
-  NVMe disk (`USB4EMU01` on port 1, `USB4EMU02` on port 2), and either can be unplugged
-  and re-plugged independently.
+- Binds `Usb4HostRouter.sys` through the ACPI `_OSC` grants, enumerates the host and device
+  routers, reads the DROMs, bonds lanes and enables both PCIe paths.
+- The tunnel comes up and QEMU's `nvme` appears behind it as a disk ("QEMU NVMe Ctrl",
+  serial `USB4EMU01`). Formatted NTFS, a 64 MB file read back with a matching SHA-256,
+  across a reboot too.
+- Hot unplug and re-plug (`device_del` / `device_add`) work, on both USB4 ports
+  independently, each with its own router and NVMe.
+- Also working (launcher flags): a dock with a PCIe switch, NVMe, NIC and USB controller
+  (`DOCK=1`); USB3 tunnelling (`USB3=1`); a daisy-chained second router (`CHAIN=1`);
+  flags combine. A Thunderbolt 3 device router on the USB4 host (`dialect=tb3`, the
+  CalDigit TS3 Plus as captured), including the ASM2464 enclosure behind it
+  ([docs/USB4-HOSTS.md](docs/USB4-HOSTS.md) §8).
+- The guest needs test-signing on (`bcdedit /set testsigning on`), or Windows' USB4 driver
+  refuses the host router (Code 31). See [docs/WINDOWS-DEBUG.md](docs/WINDOWS-DEBUG.md).
 
-Also working with the Windows 11 CM (launcher flags in brackets): a dock-style device
-router with a PCIe switch, NVMe, Intel NIC and USB controller behind one tunnel (`DOCK=1`);
-USB3 tunnelling of a USB disk behind the device router (`USB3=1`); a daisy-chained second
-router with its own NVMe (`CHAIN=1`). Flags combine, e.g. `CHAIN=1 USB3=1`. Since
-2026-10-16 the Windows 11 CM also binds a Thunderbolt 3 device router on the USB4 host
-(`usb4-device dialect=tb3`, the CalDigit TS3 Plus as captured), tunnels PCIe to its NVMe,
-and handles unplug and re-plug, including the ASM2464 enclosure behind the dock; see
-[docs/USB4-HOSTS.md](docs/USB4-HOSTS.md) §8. Linux (Kubuntu 26.04 live, software CM)
-passes the M4 exit; see [docs/LINUX-TEST.md](docs/LINUX-TEST.md).
+**Linux** (Kubuntu 26.04 live, software CM) passes the M4 exit
+([docs/LINUX-TEST.md](docs/LINUX-TEST.md)).
 
-Host and device presets beyond the minimal generic host, all on `usb4-generic`:
-`host-model=intel-adl` (the captured Framework 13 Alder Lake host, 95.6% of captured
-register reads replayed identically), `host-model=asm4242` (ASMedia AM5 desktop, public
-sources only), `host-model=amd` (public sources only), `device-model=asm2464` (the captured
-ORICO ASM2464PD enclosure) and `preos-cm=on` (a pre-OS firmware CM that builds tunnels
-before the OS starts). See [docs/USB4-HOSTS.md](docs/USB4-HOSTS.md) and
+**Presets** on `usb4-generic`: `host-model=intel-adl` (the captured Framework 13 Alder
+Lake host, 95.6% of captured register reads replayed identically), `host-model=asm4242`
+and `host-model=amd` (public sources only), `device-model=asm2464` (the captured ORICO
+ASM2464PD enclosure) and `preos-cm=on` (a firmware CM that builds tunnels before the OS).
+See [docs/USB4-HOSTS.md](docs/USB4-HOSTS.md) and
 [docs/PLATFORM-MATRIX.md](docs/PLATFORM-MATRIX.md).
 
-Windows 98 SE on i440FX enumerates the host and the `usb4-tunnel-bridge` cleanly and sees
-the NVMe behind the bridge, both when the tunnel is forced up and when the DOS reference
-CM `USB4CM.EXE` ([tools/usb4cm](tools/usb4cm/README.md)) brings it up; Windows then
-starts with the volume mounted. The P14s BIOS settings matrix runs on the Alpine Ridge
-profile, the whole controller tree can leave and come back (`root-hotplug=`), and
-Windows 2000 SP4 has been checked as well. A hang at the Windows 98 boot logo, caused by a
-bug in QEMU's TCG system management mode handling, was fixed on 2026-10-16. See
+**Windows 98 SE and 2000** on i440FX see the NVMe behind the `usb4-tunnel-bridge`, with the
+tunnel forced up or brought up by the DOS reference CM `USB4CM.EXE`
+([tools/usb4cm](tools/usb4cm/README.md)), and start with the volume mounted. The whole
+controller tree can leave and come back (`root-hotplug=`). See
 [docs/WIN98-TEST.md](docs/WIN98-TEST.md).
-Hardware capture tools for the real P14s: [tools/p14s-capture/README.md](tools/p14s-capture/README.md).
-The first Linux capture (2026-10-14) showed the P14s Gen 1 has an Intel JHL6240 **Alpine
-Ridge LP** controller, not Titan Ridge, so the firmware-CM profile is now
-`tb3-alpine-ridge`; its wire contract is [docs/ICM-PROTOCOL.md](docs/ICM-PROTOCOL.md).
-A Titan Ridge variant, `profile=tb3-titan-ridge` (JHL7540 4C with two Thunderbolt ports,
-`ports=1` for the 2C part), is modelled from the Linux ICM client alone and passes an
-unmodified Linux guest (`PROFILE=tb3-titan-ridge scripts/run-linux.sh`, `DEVICE2=1` for a
-device on the second port); see [docs/ICM-TITAN-RIDGE.md](docs/ICM-TITAN-RIDGE.md).
-`PROFILE=tb3-alpine-ridge` or `tb3-titan-ridge` with `scripts/run-cm-test.sh` boots
-Windows 11 on the firmware-CM profiles for the Intel Thunderbolt driver package. That
-smoke gate (M3) has not passed yet: the read-only DMA port (R20) and the Device Serial
-Number capability (R29) are still missing on these profiles.
 
-Requirement found on the way: **the guest needs test-signing on**
-(`bcdedit /set testsigning on`). Windows' USB4 driver refuses host routers it has not
-been validated with otherwise (Code 31). See [docs/WINDOWS-DEBUG.md](docs/WINDOWS-DEBUG.md).
+**Firmware-CM (Thunderbolt 3) profiles:**
+
+- `tb3-alpine-ridge` models the P14s Gen 1's Intel JHL6240 Alpine Ridge LP, found by the
+  first Linux capture (2026-10-14). Its wire contract is
+  [docs/ICM-PROTOCOL.md](docs/ICM-PROTOCOL.md); capture tools are in
+  [tools/p14s-capture](tools/p14s-capture/README.md).
+- `tb3-titan-ridge` (JHL7540, `ports=1` for the 2C part) is modelled from the Linux ICM
+  client alone and passes an unmodified Linux guest
+  ([docs/ICM-TITAN-RIDGE.md](docs/ICM-TITAN-RIDGE.md)).
+- Windows 11 with the Intel Thunderbolt driver package boots on both, but its smoke gate
+  (M3) has not passed: the read-only DMA port (R20) and the Device Serial Number
+  capability (R29) are still missing.
 
 ## Layout
 
