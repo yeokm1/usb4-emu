@@ -74,7 +74,7 @@ function, "router" is the device ID the host router reports in config space.
 | Alpine Ridge C 2C / 4C (JHL6340 / JHL6540) | 3 | `0x15d9` / `0x15d2` | `0x15da` / `0x15d3` | ICM | Alpine Ridge | no | device router only (`0x15d3`, captured dock) |
 | Alpine Ridge USB-only variants (LP, plain, C) | 3 | `0x15dc`, `0x15dd`, `0x15de` | n/a | bound, but no ICM dialect, so software CM | none | no | no |
 | Titan Ridge 2C / 4C (JHL7340 / JHL7540) | 3 | `0x15e8` / `0x15eb` | `0x15e7` / `0x15ea` | ICM | Titan Ridge | no | **yes, `tb3-titan-ridge`** (4C default, `ports=1` for 2C; inferred, `ICM-TITAN-RIDGE.md`) |
-| Ice Lake (integrated TB3) | 3 | `0x8a17` (NHI0), `0x8a0d` (NHI1) | same as NHI | ICM unless native | Ice Lake | no (TB3 router) | no |
+| Ice Lake (integrated TB3) | 3 | `0x8a17` (NHI0), `0x8a0d` (NHI1) | same as NHI | ICM unless native | Ice Lake | no (TB3 router) | **yes, `tb3-ice-lake`** (`host-domain=1` for NHI1; inferred, `ICM-ICE-LAKE.md`) |
 | Tiger Lake (-UP3/-H) | 4 | `0x9a1b`, `0x9a1d`, `0x9a1f`, `0x9a21` | same as NHI | software if `_OSC` native, else ICM if firmware authenticated | Tiger Lake class | v1 | no |
 | Alder Lake-P | 4 | `0x463e`, `0x466d` | `8087:463e`, `8087:466d` [obs] | software [obs] (native `_OSC`) | Tiger Lake class | v1 [obs] | **yes, `usb4-generic` `host-model=intel-adl`** (register images; PCI identity stays emulator-specific) |
 | Raptor Lake | 4 | `0xa73e`, `0xa76d` | `8087:` same [inf] | as Alder Lake | Tiger Lake class | v1 | no (would reuse `intel-adl`) |

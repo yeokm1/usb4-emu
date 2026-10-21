@@ -17,6 +17,12 @@
 # on port 2, NVMe vms/linux/nvme2.qcow2), HOST_OPTS (extra usb4-host
 # properties, e.g. ",security=none,rtd3=on"), VM_DIR (default vms/linux, for
 # parallel runs).
+# PROFILE=tb3-ice-lake: the Ice Lake integrated host under its firmware CM
+# (docs/ICM-ICE-LAKE.md, inferred), two ports with tunnel root ports tp0 and
+# tp1 on pcie.0 (no switch topology, no BIOS cells); DEVICE2=1 as for Titan
+# Ridge. DEVICE2_MODEL=asm2464 makes only the port-2 router the ORICO's USB4
+# ASM2464 (port 1 keeps DEVICE_MODEL / the TB3 dock), so one guest sees a
+# TB3 and a USB4 device router at once.
 # HOST_MODEL=asm4242 (usb4-generic): the ASMedia ASM4242 preset of AM5 X870
 # boards (docs/USB4-HOSTS.md 5, public sources only), two USB4 ports with
 # tunnel ports tp0 and tp1; DEVICE2=1 adds a device router on port 2. With
@@ -73,6 +79,8 @@ TR=0
 case "$PROFILE" in
     tb3-alpine-ridge) DIALECT=",dialect=tb3" ;;
     tb3-titan-ridge) DIALECT=",dialect=tb3"; TR=1 ;;
+    tb3-ice-lake) DIALECT=",dialect=tb3"; TR=1
+        [ -n "${BIOS:-}" ] && { echo "run-linux: no BIOS cells on tb3-ice-lake" >&2; exit 1; } ;;
 esac
 ISO="${ISO:-/d/isos/kubuntu-26.04.1-desktop-amd64.iso}"
 export PATH="$REPO/toolchain/msys64/ucrt64/bin:$PATH"
@@ -91,8 +99,10 @@ DEV=(-device "usb4-device,id=enc0,bus=u4.0,port=1,drive=nvme0,serial=USB4EMU01$D
 [ "${NO_DEVICE:-0}" = 1 ] && DEV=()
 if [ "$TR" = 1 ] && [ "${DEVICE2:-0}" = 1 ]; then
     [ -f "$VM/nvme2.qcow2" ] || "$REPO/vms/qemu-baseline/qemu-img.exe" create -q         -f qcow2 "$(w "$VM/nvme2.qcow2")" 1G
+    D2="$DIALECT"
+    [ -n "${DEVICE2_MODEL:-}" ] && D2=",dialect=usb4,device-model=$DEVICE2_MODEL"
     DEV+=(-drive "if=none,id=nvme1,format=qcow2,file=$(w "$VM/nvme2.qcow2")"
-          -device "usb4-device,id=enc1,bus=u4.0,port=2,drive=nvme1,serial=USB4EMU02$DIALECT")
+          -device "usb4-device,id=enc1,bus=u4.0,port=2,drive=nvme1,serial=USB4EMU02$D2")
 fi
 # TOPOLOGY=bridge (default): tunnel root port and NHI on pcie.0.
 # TOPOLOGY=switch (tb3 profiles only): the captured Alpine Ridge PCIe

@@ -214,6 +214,41 @@ Boot to a login prompt took about a minute, as on the other profiles.
   new enumeration), and after approval the NVMe stays readable while the NHI is
   suspended.
 
+## Ice Lake profile (firmware CM, `tb3-ice-lake`)
+
+Run 2026-10-22 against the QEMU branch `icm-icelake`, same Kubuntu live ISO, kernel
+7.0.0-30. The profile is inferred from the Linux client ([ICM-ICE-LAKE.md](ICM-ICE-LAKE.md)),
+so this run shows the model and the Linux Ice Lake client agree; it says nothing about
+real Ice Lake firmware.
+
+```
+PROFILE=tb3-ice-lake DEVICE2=1 DEVICE2_MODEL=asm2464 VM_DIR=vms/linux-icl     QMP_PORT=48470 SERIAL_PORT=48471 BUILD_EXE=src/qemu/build/qemu-system-x86_64.exe     scripts/run-linux.sh
+```
+
+Port 1 carries the TB3 dock model (`dialect=tb3`), port 2 the ORICO's USB4 ASM2464
+model; tunnel root ports tp0 (00:05.0) and tp1 (00:06.0) and the NHI (00:04.0) on
+`pcie.0`.
+
+- lspci: "System peripheral [0880]: Intel Corporation Ice Lake Thunderbolt 3 NHI #0
+  [8086:8a17] (rev 03)". The usb4 trace shows the client's Force Power write
+  (`VS_CAP_22` `0x22000002`) and LTR (`0x08460846`) before ring 0 starts.
+- Probe: `total paths: 12`, `using firmware connection manager`, `security level set
+  to none`, host "Thunderbolt 3 Switch: 8086:8a17", ports 1-4 lane, 5 inactive, 6 and 7
+  not implemented, 8 and 9 PCIe, 10 and 11 DP. `domain0` has no `boot_acl`.
+- Ice Lake path: driver-ready response `0100a203 00200000 00500000 00008a17`; both
+  routers announced approved in the 63-word event, no approve command; the dock read
+  at route 1 (`0-1`, generation 3) and the USB4 router read at route 3 by Read
+  Requests while the firmware owns the fabric: ROUTER_CS_0-4 `2463174c 001101c0
+  00000003 80000000 200000fe`, Linux "USB4 Switch: 174c:2463 (Revision: 0, TB
+  Version: 32)", `0-3` generation 4, `unique_id` `00279170-8e60-4c17-ffff-...`,
+  "ASMedia 246x". Root switch `unique_id` from `VS_CAP_10/11` plus all ones.
+- Both NVMe disks (`USB4EMU01`, `USB4EMU02`) present from the first PCI scan; a 16 MiB
+  O_DIRECT write and read-back matched (SHA-256) on both.
+- With the NHI active (`power/control` on): `device_del enc1` gives pciehp link down
+  and "0-3: device disconnected"; `device_add` of the ASM2464 brings the event, the
+  route-3 read again and the NVMe back. An unplug while the NHI is runtime suspended
+  is only seen at the next driver ready (ICM-ICE-LAKE.md 5).
+
 ## ASMedia ASM4242 preset (`host-model=asm4242`, public sources only)
 
 Run 2026-10-15 against the QEMU branch `usb4-asm`, same Kubuntu live ISO and kernel:

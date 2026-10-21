@@ -14,7 +14,8 @@ The real demo hardware is a ThinkPad P14s Gen 1 with an Intel JHL6240 Alpine Rid
 Thunderbolt 3 controller (NHI `8086:15bf`, confirmed by the 2026-10-14 capture), so the
 Alpine Ridge firmware-CM profile `tb3-alpine-ridge` is the first target. Titan Ridge is
 an uncaptured later variant, modelled from the Linux client only as
-`profile=tb3-titan-ridge` (`docs/ICM-TITAN-RIDGE.md`).
+`profile=tb3-titan-ridge` (`docs/ICM-TITAN-RIDGE.md`). The Ice Lake integrated host under its
+firmware CM is modelled the same way as `profile=tb3-ice-lake` (`docs/ICM-ICE-LAKE.md`).
 
 Read these first, in order:
 

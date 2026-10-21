@@ -1,6 +1,7 @@
 usb4-emu QEMU changes against v11.1.2
-Exported from branch usb4-emu at 2a893ea
+Exported from branch usb4-emu at f1e36f8
 
+  f1e36f8 usb4: tb3-ice-lake, the Ice Lake firmware CM variant
   0702fa0 tests/qtest: cover RSM in x86-smm-tlb-test, gate it on VGA
   5748fdd target/i386: flush the TLB on SMM entry and RSM
   20c8784 tests/qtest: TB3 dock DMA port on a USB4 host
@@ -2193,10 +2194,10 @@ index 0000000000000000000000000000000000000000..b41f84b609ea07c2c596c6d9ee362da7
 +))
 diff --git a/hw/usb4/trace-events b/hw/usb4/trace-events
 new file mode 100644
-index 0000000000000000000000000000000000000000..39e6dd5e2a6e8c335a1e2719592b6fbe38cf917e
+index 0000000000000000000000000000000000000000..91e5431ec754e2db0ccf02ad86f7424c28700a7a
 --- /dev/null
 +++ b/hw/usb4/trace-events
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,174 @@
 +# See docs/devel/tracing.rst for syntax documentation.
 +# usb4-emu fabric. Route strings are 64-bit: bit 63 is the CM bit.
 +
@@ -2344,6 +2345,7 @@ index 0000000000000000000000000000000000000000..39e6dd5e2a6e8c335a1e2719592b6fbe
 +usb4_host_mailbox(uint32_t cmd, bool ok) "NHI inbound mailbox command 0x%08" PRIx32 " ok %d"
 +usb4_host_power(bool on, bool force) "tb3 controller power %d (force power %d)"
 +usb4_host_power_state(const char *what) "NHI %s"
++usb4_host_icl_vs(const char *what, uint32_t val) "Ice Lake VS_CAP %s 0x%08x"
 +usb4_host_usb_fallback(unsigned port, const char *what) "USB4 port %u USB mode: %s"
 +
 +# usb4-preos.c
@@ -8877,10 +8879,10 @@ index 0000000000000000000000000000000000000000..3e94279e23d6a66baf8f359d4cb2577d
 +#endif
 diff --git a/hw/usb4/usb4-host.c b/hw/usb4/usb4-host.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae41cc30d5f
+index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5f5cded87
 --- /dev/null
 +++ b/hw/usb4/usb4-host.c
-@@ -0,0 +1,3014 @@
+@@ -0,0 +1,3191 @@
 +/*
 + * USB4 / Thunderbolt 3 host interface (the "NHI" PCI function)
 + *
@@ -9111,7 +9113,44 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +        "tb3-titan-ridge (4C)", 0x15eb, 0x15ea, 6,
 +        USB4_TB3_HOST_TR_4C, USB4_ICM_DIALECT_TR, 0x00500000,
 +    },
++    /*
++     * Ice Lake (docs/ICM-ICE-LAKE.md 1): NHI0 0x8a17 from Linux nhi.h
++     * (PCI_DEVICE_ID_INTEL_ICL_NHI0); host-domain=1 gives NHI1 0x8a0d.
++     * The host router reports the NHI's device ID in ROUTER_CS_0: Linux
++     * switch.c (tb_switch_get_generation) lists the two ICL NHI IDs among
++     * the router IDs of generation 3 [inf]. Revision 3 [emu].
++     */
++    [USB4_TB3_HOST_ICL] = {
++        "tb3-ice-lake", 0x8a17, 0x8a17, 3,
++        USB4_TB3_HOST_ICL, USB4_ICM_DIALECT_ICL, 0x00500000,
++    },
 +};
++
++#define ICL_NHI1_DEVICE             0x8a0d   /* Linux nhi.h ICL_NHI1 */
++
++/*
++ * Ice Lake NHI vendor-specific PCI config registers (Linux nhi_regs.h
++ * "ICL NHI VSEC registers", used by pci.c icl_nhi_ops and icm.c
++ * icm_icl_set_uuid; docs/ICM-ICE-LAKE.md 2, inferred). The offsets are
++ * fixed config space offsets, so the PCIe capability of this variant
++ * moves below them (0x40).
++ */
++#define ICL_VS_CAP_9                0xc8    /* bit 31 firmware ready */
++#define  ICL_VS_CAP_9_FW_READY      (1u << 31)
++#define ICL_VS_CAP_10               0xcc    /* host UUID dword 0 */
++#define ICL_VS_CAP_11               0xd0    /* host UUID dword 1 */
++#define ICL_VS_CAP_15               0xe0    /* LTR, written by the driver */
++#define ICL_VS_CAP_16               0xe4    /* maximum LTR, 15:0 */
++#define ICL_VS_CAP_18               0xec    /* LC mailbox: bit 0 done */
++#define  ICL_VS_CAP_18_DONE         (1u << 0)
++#define ICL_VS_CAP_19               0xf0    /* LC mailbox: cmd 7:1, valid */
++#define  ICL_VS_CAP_19_VALID        (1u << 0)
++#define ICL_VS_CAP_22               0xfc    /* force power, DMA delay */
++#define  ICL_VS_CAP_22_FORCE_POWER  (1u << 1)
++#define  ICL_VS_CAP_22_WMASK        0xff000002u
++/* [emu]: no capture gives the value; 70 x 1024 ns */
++#define ICL_MAX_LTR                 0x00000846u
++#define ICL_PCIE_CAP                0x40
 +
 +/*
 + * R2: BAR0 values with the firmware running (ICM-PROTOCOL.md 2.1, 13.5).
@@ -9280,6 +9319,83 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +
 +static void usb4_host_power_eval(USB4Host *s);
 +static void usb4_host_reconcile_tunnels(Notifier *n, void *data);
++
++static bool usb4_host_icl(USB4Host *s)
++{
++    return s->profile == USB4_PROFILE_TB3_ALPINE_RIDGE &&
++           s->tb3_host == USB4_TB3_HOST_ICL;
++}
++
++/* TB3 profile: NHI device ID, also the host router ID on Ice Lake */
++static uint16_t usb4_tb3_nhi_device(USB4Host *s)
++{
++    if (usb4_host_icl(s) && s->host_domain == 1) {
++        return ICL_NHI1_DEVICE;
++    }
++    return usb4_tb3_ids[s->tb3_host].nhi_device;
++}
++
++static uint16_t usb4_tb3_router_device(USB4Host *s)
++{
++    if (usb4_host_icl(s) && s->host_domain == 1) {
++        return ICL_NHI1_DEVICE;
++    }
++    return usb4_tb3_ids[s->tb3_host].router_device;
++}
++
++/*
++ * Ice Lake vendor-specific config registers at reset (ICM-ICE-LAKE.md
++ * 2): force power off, firmware not reported ready, LC mailbox idle.
++ * VS_CAP_10/11 carry the first two dwords of the host UUID, the same
++ * dwords the host router's link controller reports (router dwords
++ * 0x102-0x103), so Linux's root switch UUID (VS_CAP_10, VS_CAP_11, then
++ * all ones; icm.c icm_icl_set_uuid) is stable per host [emu].
++ */
++static void usb4_host_icl_vs_reset(USB4Host *s)
++{
++    PCIDevice *pd = PCI_DEVICE(s);
++
++    pci_set_long(pd->config + ICL_VS_CAP_9, 0);
++    pci_set_long(pd->config + ICL_VS_CAP_10, ldl_le_p(s->uuid.data));
++    pci_set_long(pd->config + ICL_VS_CAP_11, ldl_le_p(s->uuid.data + 4));
++    pci_set_long(pd->config + ICL_VS_CAP_15, 0);
++    pci_set_long(pd->config + ICL_VS_CAP_16, ICL_MAX_LTR);
++    pci_set_long(pd->config + ICL_VS_CAP_18, 0);
++    pci_set_long(pd->config + ICL_VS_CAP_19, 0);
++    pci_set_long(pd->config + ICL_VS_CAP_22, 0);
++}
++
++/*
++ * After a guest write: Linux pci.c icl_nhi_force_power sets Force Power
++ * and polls VS_CAP_9 FW_READY; icl_nhi_lc_mailbox_cmd writes a command
++ * with Valid to VS_CAP_19 and polls VS_CAP_18 Done, then clears
++ * VS_CAP_19 [inf]. The model's firmware is always running: it reports
++ * ready while Force Power is set and completes every LC mailbox command
++ * at once (ICL_LC_GO2SX 0x02, GO2SX_NO_WAKE 0x03, PREPARE_FOR_RESET
++ * 0x21; no effect on the fabric) [emu].
++ */
++static void usb4_host_icl_vs_write(USB4Host *s, uint32_t addr, int len)
++{
++    PCIDevice *pd = PCI_DEVICE(s);
++    uint32_t v22 = pci_get_long(pd->config + ICL_VS_CAP_22);
++    uint32_t v19 = pci_get_long(pd->config + ICL_VS_CAP_19);
++
++    if (ranges_overlap(addr, len, ICL_VS_CAP_22, 4)) {
++        pci_set_long(pd->config + ICL_VS_CAP_9,
++                     (v22 & ICL_VS_CAP_22_FORCE_POWER) ?
++                     ICL_VS_CAP_9_FW_READY : 0);
++        trace_usb4_host_icl_vs("force power", v22);
++    }
++    if (ranges_overlap(addr, len, ICL_VS_CAP_19, 4)) {
++        pci_set_long(pd->config + ICL_VS_CAP_18,
++                     (v19 & ICL_VS_CAP_19_VALID) ? ICL_VS_CAP_18_DONE : 0);
++        trace_usb4_host_icl_vs("LC mailbox", v19);
++    }
++    if (ranges_overlap(addr, len, ICL_VS_CAP_15, 4)) {
++        trace_usb4_host_icl_vs("LTR", pci_get_long(pd->config +
++                                                   ICL_VS_CAP_15));
++    }
++}
 +
 +static const char *usb4_profile_name(USB4Host *s)
 +{
@@ -11236,9 +11352,38 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +        }
 +        s->tb3_host = s->num_ports == 1 ? USB4_TB3_HOST_TR_2C
 +                                        : USB4_TB3_HOST_TR_4C;
++    } else if (!strcmp(s->profile_str, "tb3-ice-lake")) {
++        /*
++         * Ice Lake integrated Thunderbolt under its firmware CM
++         * (docs/ICM-ICE-LAKE.md, inferred from the Linux client): two
++         * ports, NHI0 or with host-domain=1 NHI1.
++         */
++        s->profile = USB4_PROFILE_TB3_ALPINE_RIDGE;
++        s->tb3_host = USB4_TB3_HOST_ICL;
++        if (s->num_ports != 2) {
++            error_setg(errp, "usb4-host: tb3-ice-lake has two ports");
++            return;
++        }
++        if (s->host_domain > 1) {
++            error_setg(errp, "usb4-host: tb3-ice-lake needs host-domain "
++                       "0 (NHI0 8a17) or 1 (NHI1 8a0d)");
++            return;
++        }
++        /*
++         * BIOS Assist, pre-boot, the TB xHCI and its USB fallback are
++         * the P14s platform (ICM-PROTOCOL.md 12, 13); an integrated Ice
++         * Lake host has none of them in this model (ICM-ICE-LAKE.md 5).
++         */
++        if (s->bios_assist || s->xhci_id || s->usb_fallback_str ||
++            s->preboot) {
++            error_setg(errp, "usb4-host: tb3-ice-lake has no bios-assist, "
++                       "preboot, xhci or usb-fallback");
++            return;
++        }
 +    } else {
 +        error_setg(errp, "usb4-host: unknown profile '%s' (use usb4-generic"
-+                   ", tb3-alpine-ridge or tb3-titan-ridge)", s->profile_str);
++                   ", tb3-alpine-ridge, tb3-titan-ridge or tb3-ice-lake)",
++                   s->profile_str);
 +        return;
 +    }
 +    s->paths = s->profile == USB4_PROFILE_TB3_ALPINE_RIDGE ? TB3_AR_PATHS
@@ -11316,7 +11461,14 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +        return;
 +    }
 +    if (s->profile == USB4_PROFILE_TB3_ALPINE_RIDGE) {
-+        if (!s->security_str || !strcmp(s->security_str, "user")) {
++        if (!s->security_str && usb4_host_icl(s)) {
++            /*
++             * ICM-ICE-LAKE.md 3.4: the Linux Ice Lake client has no
++             * approve, so the firmware tunnels by itself (security
++             * none) unless security=user is asked for.
++             */
++            icfg.security = 0;
++        } else if (!s->security_str || !strcmp(s->security_str, "user")) {
 +            icfg.security = 1;
 +        } else if (!strcmp(s->security_str, "none")) {
 +            icfg.security = 0;
@@ -11327,12 +11479,13 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +        icfg.rtd3 = s->rtd3;
 +        icfg.bios_assist = s->bios_assist;
 +        icfg.dialect = usb4_tb3_ids[s->tb3_host].dialect;
-+        icfg.device_id = usb4_tb3_ids[s->tb3_host].nhi_device;
++        icfg.device_id = usb4_tb3_nhi_device(s);
 +        icfg.nvm_version = usb4_tb3_ids[s->tb3_host].nvm_version;
-+        icfg.boot_acl_slots = 16;
++        /* Ice Lake: no boot ACL in the Linux client (ICM-ICE-LAKE.md 3) */
++        icfg.boot_acl_slots = usb4_host_icl(s) ? 0 : 16;
 +        icfg.preboot = s->preboot;
 +        icfg.preboot_acl_only = s->preboot_acl_only;
-+        icfg.usb_fallback_ms = s->usb_fallback_ms;
++        icfg.usb_fallback_ms = usb4_host_icl(s) ? 0 : s->usb_fallback_ms;
 +        /* R33: the TB xHCI; a forward reference is checked at init done */
 +        if (!usb4_host_xhci_check(s, DEVICE(s)->hotplugged, errp)) {
 +            return;
@@ -11357,9 +11510,10 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +        }
 +        /*
 +         * Alpine Ridge LP: one Thunderbolt port (ICM-PROTOCOL.md 1);
-+         * Titan Ridge 2C one, 4C two (ICM-TITAN-RIDGE.md 1).
++         * Titan Ridge 2C one, 4C two (ICM-TITAN-RIDGE.md 1); Ice Lake
++         * two (ICM-ICE-LAKE.md 1).
 +         */
-+        s->num_ports = s->tb3_host == USB4_TB3_HOST_TR_4C ? 2 : 1;
++        s->num_ports = usb4_tb3_host_two_ports(s->tb3_host) ? 2 : 1;
 +        /* R27: power follows BIOS Assist unless power=always */
 +        if (!s->power_str || !strcmp(s->power_str, "auto")) {
 +            s->power_auto = s->bios_assist;
@@ -11380,8 +11534,7 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +    if (s->profile == USB4_PROFILE_TB3_ALPINE_RIDGE) {
 +        /* R1, ICM-PROTOCOL.md 1 */
 +        pci_config_set_vendor_id(pd->config, PCI_VENDOR_ID_INTEL);
-+        pci_config_set_device_id(pd->config,
-+                                 usb4_tb3_ids[s->tb3_host].nhi_device);
++        pci_config_set_device_id(pd->config, usb4_tb3_nhi_device(s));
 +        pci_config_set_class(pd->config, TB3_AR_CLASS);
 +        pci_config_set_prog_interface(pd->config, 0);
 +        pci_set_word(pd->config + PCI_SUBSYSTEM_VENDOR_ID,
@@ -11469,7 +11622,14 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +            msix_vector_use(pd, i);
 +        }
 +    }
-+    if (express && s->profile == USB4_PROFILE_TB3_ALPINE_RIDGE) {
++    if (express && usb4_host_icl(s)) {
++        /* below the vendor-specific registers 0xc8-0xff [emu] */
++        ret = pcie_endpoint_cap_init(pd, ICL_PCIE_CAP);
++        if (ret < 0) {
++            error_setg(errp, "usb4-host: PCIe capability init failed");
++            return;
++        }
++    } else if (express && s->profile == USB4_PROFILE_TB3_ALPINE_RIDGE) {
 +        /* R1: PCIe endpoint capability at 0xc0, no USB4 DVSEC */
 +        ret = pcie_endpoint_cap_init(pd, 0xc0);
 +        if (ret < 0) {
@@ -11500,6 +11660,19 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +        pci_set_long(pd->config + USB4_DVSEC_OFFSET + 12, 0);
 +    }
 +
++    if (usb4_host_icl(s)) {
++        /*
++         * ICM-ICE-LAKE.md 2: read-only but for VS_CAP_15, _19 and _22
++         * (QEMU leaves bytes after the header writable by default).
++         */
++        memset(pd->wmask + ICL_VS_CAP_9, 0,
++               PCI_CONFIG_SPACE_SIZE - ICL_VS_CAP_9);
++        pci_set_long(pd->wmask + ICL_VS_CAP_15, 0xffffffffu);
++        pci_set_long(pd->wmask + ICL_VS_CAP_19, 0x000000ffu);
++        pci_set_long(pd->wmask + ICL_VS_CAP_22, ICL_VS_CAP_22_WMASK);
++        usb4_host_icl_vs_reset(s);
++    }
++
 +    g_queue_init(&s->rx_fifo);
 +
 +    /* The usb4 bus for device routers, named "<id>.0". */
@@ -11511,7 +11684,7 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +                  USB4_DIALECT_TB3 : USB4_DIALECT_USB4;
 +    if (s->profile == USB4_PROFILE_TB3_ALPINE_RIDGE) {
 +        cfg.router_vendor_id = TB3_AR_ROUTER_VENDOR;
-+        cfg.router_device_id = usb4_tb3_ids[s->tb3_host].router_device;
++        cfg.router_device_id = usb4_tb3_router_device(s);
 +        cfg.tb3_host = s->tb3_host;
 +    } else if (s->host_model == USB4_HOST_MODEL_ASM4242) {
 +        cfg.router_vendor_id = ASM_ROUTER_VENDOR;
@@ -11687,6 +11860,9 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +         usb4_tunnel_port_power_cycling(usb4_host_power_domain(s)));
 +
 +    usb4_host_hi_reset(s, "device reset");
++    if (usb4_host_icl(s)) {
++        usb4_host_icl_vs_reset(s);
++    }
 +    s->inmail_data = 0;
 +    s->inmail_cmd = 0;
 +    s->been_d3 = false;
@@ -11736,6 +11912,9 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +        return;
 +    }
 +    pci_default_write_config(pd, addr, val, len);
++    if (usb4_host_icl(s)) {
++        usb4_host_icl_vs_write(s, addr, len);
++    }
 +    /* MSI/MSI-X enable changes INTx eligibility. */
 +    usb4_host_update_intx(s);
 +    /*
@@ -11897,10 +12076,10 @@ index 0000000000000000000000000000000000000000..d47b96848a9aa2a8fbdda22793ea3ae4
 +type_init(usb4_host_register_types)
 diff --git a/hw/usb4/usb4-icm.c b/hw/usb4/usb4-icm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..60ecb678f7936951cc5f562b0d510a2b6a9a74f3
+index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b35355c6f9ea
 --- /dev/null
 +++ b/hw/usb4/usb4-icm.c
-@@ -0,0 +1,1287 @@
+@@ -0,0 +1,1296 @@
 +/*
 + * Emulated Intel Alpine Ridge / Titan Ridge firmware connection manager
 + * ("ICM")
@@ -11923,6 +12102,9 @@ index 0000000000000000000000000000000000000000..60ecb678f7936951cc5f562b0d510a2b
 + * the commit pinned in docs/REFERENCES.md; requirements T1-T12 cited as
 + * "TR Tn"). The two dialects differ only in message layouts: approve,
 + * pre-boot, boot ACL, mailbox and fabric programming are shared.
++ * Ice Lake (docs/ICM-ICE-LAKE.md, requirements "ICL n", also inferred
++ * from the Linux client only) uses the Titan Ridge layouts; the host
++ * configures it without a boot ACL and with security none.
 + */
 +
 +#include "qemu/osdep.h"
@@ -12046,9 +12228,15 @@ index 0000000000000000000000000000000000000000..60ecb678f7936951cc5f562b0d510a2b
 +    return (code & 0xff) | ((flags & 0xff) << 8) | (1u << 24);
 +}
 +
++/*
++ * The Titan Ridge message layouts: Titan Ridge, and Ice Lake, whose
++ * Linux client uses the Titan Ridge structures for driver ready, device
++ * connected and disconnected (docs/ICM-ICE-LAKE.md 3, inferred).
++ */
 +static bool icm_tr(USB4ICM *icm)
 +{
-+    return icm->cfg.dialect == USB4_ICM_DIALECT_TR;
++    return icm->cfg.dialect == USB4_ICM_DIALECT_TR ||
++           icm->cfg.dialect == USB4_ICM_DIALECT_ICL;
 +}
 +
 +static void icm_send(USB4ICM *icm, uint8_t pdf, const uint32_t *dw,
@@ -13190,10 +13378,10 @@ index 0000000000000000000000000000000000000000..60ecb678f7936951cc5f562b0d510a2b
 +}
 diff --git a/hw/usb4/usb4-internal.h b/hw/usb4/usb4-internal.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5dda6dc5a2d64760de5eb66d403b84d06ca6e596
+index 0000000000000000000000000000000000000000..bd71f59b71123cfebb373c3cdc03bc72798b6665
 --- /dev/null
 +++ b/hw/usb4/usb4-internal.h
-@@ -0,0 +1,567 @@
+@@ -0,0 +1,581 @@
 +/*
 + * USB4 / Thunderbolt 3 host emulation - internal interfaces
 + *
@@ -13227,7 +13415,8 @@ index 0000000000000000000000000000000000000000..5dda6dc5a2d64760de5eb66d403b84d0
 +     * (ICM-PROTOCOL.md). One profile for every TB3 controller: the
 +     * controller variant (USB4Tb3Host) only selects the PCI identity,
 +     * the host router layout and the ICM message dialect. Profile names
-+     * tb3-alpine-ridge and tb3-titan-ridge (ICM-TITAN-RIDGE.md).
++     * tb3-alpine-ridge, tb3-titan-ridge (ICM-TITAN-RIDGE.md) and
++     * tb3-ice-lake (ICM-ICE-LAKE.md).
 +     */
 +    USB4_PROFILE_TB3_ALPINE_RIDGE = 1,
 +} USB4Profile;
@@ -13242,12 +13431,25 @@ index 0000000000000000000000000000000000000000..5dda6dc5a2d64760de5eb66d403b84d0
 +    USB4_TB3_HOST_AR_LP = 0,    /* JHL6240, one port */
 +    USB4_TB3_HOST_TR_2C = 1,    /* JHL7340, one port */
 +    USB4_TB3_HOST_TR_4C = 2,    /* JHL7540, two ports */
++    /*
++     * Ice Lake integrated Thunderbolt (docs/ICM-ICE-LAKE.md, inferred):
++     * two ports, the Titan Ridge 4C host router layout.
++     */
++    USB4_TB3_HOST_ICL = 3,
 +} USB4Tb3Host;
++
++/* A TB3 host router variant with two Thunderbolt ports (4C layout). */
++static inline bool usb4_tb3_host_two_ports(USB4Tb3Host h)
++{
++    return h == USB4_TB3_HOST_TR_4C || h == USB4_TB3_HOST_ICL;
++}
 +
 +/* ICM message dialect (docs/ICM-TITAN-RIDGE.md 2) */
 +typedef enum USB4ICMDialect {
 +    USB4_ICM_DIALECT_AR = 0,    /* Alpine Ridge, ICM-PROTOCOL.md 4 */
 +    USB4_ICM_DIALECT_TR = 1,    /* Titan Ridge, ICM-TITAN-RIDGE.md 3 */
++    /* Ice Lake: the Titan Ridge layouts, ICM-ICE-LAKE.md 3 */
++    USB4_ICM_DIALECT_ICL = 2,
 +} USB4ICMDialect;
 +
 +typedef enum USB4Dialect {
@@ -15033,10 +15235,10 @@ index 0000000000000000000000000000000000000000..b2cead56ff66a37b2cdc86ac4da34105
 +}
 diff --git a/hw/usb4/usb4-router-tb3.c b/hw/usb4/usb4-router-tb3.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..22c62a77176c6fdd6f1c17f607734f693d33670b
+index 0000000000000000000000000000000000000000..11158b46574dd8509b058f62871b4654a8c1c51c
 --- /dev/null
 +++ b/hw/usb4/usb4-router-tb3.c
-@@ -0,0 +1,1021 @@
+@@ -0,0 +1,1023 @@
 +/*
 + * Thunderbolt 3 (tb3 dialect) router model: the Alpine Ridge or Titan
 + * Ridge host router and a TB3 device router as a firmware connection
@@ -15274,6 +15476,8 @@ index 0000000000000000000000000000000000000000..22c62a77176c6fdd6f1c17f607734f69
 + * port B (the per-port PCIe Down numbers the Linux software CM hard-codes
 + * for Titan Ridge), 10-11 DP IN (11 on 4C only). No USB3 adapters: a
 + * Thunderbolt 3 router tunnels USB as PCIe to an xHCI in the device.
++ * The Ice Lake host router reuses the 4C layout (docs/ICM-ICE-LAKE.md 4,
++ * an emulator choice: Linux hard-codes no Ice Lake adapter numbers).
 + */
 +static void tb3_host_tr(USB4Router *r, bool four_c)
 +{
@@ -15313,7 +15517,7 @@ index 0000000000000000000000000000000000000000..22c62a77176c6fdd6f1c17f607734f69
 +    r->dialect = USB4_DIALECT_TB3;
 +    r->rtd3 = true;
 +    if (is_host && f->cfg.tb3_host != USB4_TB3_HOST_AR_LP) {
-+        tb3_host_tr(r, f->cfg.tb3_host == USB4_TB3_HOST_TR_4C);
++        tb3_host_tr(r, usb4_tb3_host_two_ports(f->cfg.tb3_host));
 +    } else if (is_host) {
 +        r->nports = 1;
 +        set_lanes(r, 1, true);
@@ -23949,7 +24153,7 @@ index 4bbe18a86fbb8e10204829f373374a8a9194fafe..e9ac59fccecb862b8af6d9c7588eaad4
      qemu_log_mask(CPU_LOG_INT, "SMM: after RSM\n");
      log_cpu_state_mask(CPU_LOG_INT, CPU(cpu), CPU_DUMP_CCOP);
 diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
-index 78b30106496367362132cbdbfa6c535983241759..3520514703eb57587fb6d02f8771a0306594199c 100644
+index 78b30106496367362132cbdbfa6c535983241759..8eb5c57e6e34ae216a2eef183c20bfa8fb24f779 100644
 --- a/tests/qtest/meson.build
 +++ b/tests/qtest/meson.build
 @@ -17,6 +17,7 @@ slow_qtests = {
@@ -23970,7 +24174,7 @@ index 78b30106496367362132cbdbfa6c535983241759..3520514703eb57587fb6d02f8771a030
    (config_all_devices.has_key('CONFIG_I440FX') ? ['ide-test'] : []) +                       \
    (config_all_devices.has_key('CONFIG_I440FX') ? ['numa-test'] : []) +                      \
    (config_all_devices.has_key('CONFIG_I440FX') ? ['test-x86-cpuid-compat'] : []) +          \
-@@ -74,9 +78,18 @@ qtests_i386 = \
+@@ -74,9 +78,19 @@ qtests_i386 = \
    (config_all_devices.has_key('CONFIG_WDT_IB700') ? ['wdt_ib700-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_PVPANIC_ISA') ? ['pvpanic-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_PVPANIC_PCI') ? ['pvpanic-pci-test'] : []) +          \
@@ -23981,6 +24185,7 @@ index 78b30106496367362132cbdbfa6c535983241759..3520514703eb57587fb6d02f8771a030
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-tunnel-test'] : []) +                 \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-icm-test'] : []) +                    \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-icm-tr-test'] : []) +                 \
++  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-icm-icl-test'] : []) +                \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-harness-test'] : []) +                \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-asm4242-test'] : []) +               \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-asm2464-test'] : []) +               \
@@ -28313,6 +28518,649 @@ index 0000000000000000000000000000000000000000..10b70206fb44da3555fb16e3b14f44ab
 +
 +    return g_test_run();
 +}
+diff --git a/tests/qtest/usb4-icm-icl-test.c b/tests/qtest/usb4-icm-icl-test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d77c572bbc2512f5f79d78e72f14cf0ad20fc41
+--- /dev/null
++++ b/tests/qtest/usb4-icm-icl-test.c
+@@ -0,0 +1,637 @@
++/*
++ * QTest for the tb3-ice-lake profile of usb4-host: the Ice Lake variant
++ * of the emulated firmware connection manager (ICM)
++ *
++ * Copyright (c) 2026 usb4-emu contributors
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Same structure and helpers as usb4-icm-tr-test.c. Expected values come
++ * from docs/ICM-ICE-LAKE.md, which is inferred from the Linux ICM client
++ * (icm.c icm_icl_*, pci.c icl_nhi_ops), not from a capture: these tests
++ * pin the model to that description (requirements ICL1-ICL9), they do
++ * not prove real Ice Lake firmware behaves the same. The guest side is
++ * driven by polling only: MSI, MSI-X and INTx are never enabled.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/bswap.h"
++#include "libqtest.h"
++#include "libqos/pci.h"
++#include "libqos/pci-pc.h"
++#include "libqos/malloc-pc.h"
++#include "hw/pci/pci_regs.h"
++#include "qobject/qdict.h"
++
++#define DEVFN                QPCI_DEVFN(4, 0)
++#define TP_PATH              "/machine/peripheral/tp0"
++#define TP1_PATH             "/machine/peripheral/tp1"
++
++/* BAR0, ICM-PROTOCOL.md 2.1 (shared) */
++#define TX_RING(n)           (0x00000 + (n) * 0x10)
++#define RX_RING(n)           (0x08000 + (n) * 0x10)
++#define  RING_BASE_LO        0x0
++#define  RING_BASE_HI        0x4
++#define  RING_INDEX          0x8
++#define  RING_SIZE           0xc
++#define TX_CTRL(n)           (0x19800 + (n) * 0x20)
++#define RX_CTRL(n)           (0x29800 + (n) * 0x20)
++#define RX_PDF(n)            (0x29804 + (n) * 0x20)
++#define RING_VALID           (1u << 31)
++#define RING_RAW             (1u << 30)
++#define IMR0                 0x38200
++#define HI_CAPS              0x39640
++#define INMAIL_DATA          0x39900
++#define INMAIL_CMD           0x39904
++#define FW_STS               0x39944
++
++/* Linux nhi_regs.h, ICL NHI VSEC registers (ICL2) */
++#define VS_CAP_9             0xc8
++#define VS_CAP_10            0xcc
++#define VS_CAP_11            0xd0
++#define VS_CAP_15            0xe0
++#define VS_CAP_16            0xe4
++#define VS_CAP_18            0xec
++#define VS_CAP_19            0xf0
++#define VS_CAP_22            0xfc
++
++#define PDF_READ             1
++#define PDF_WRITE            2
++#define PDF_ERROR            3
++#define PDF_ICM_EVENT        10
++#define PDF_ICM_CMD          11
++#define PDF_ICM_RESP         12
++
++#define DESC_DD              (1u << 21)
++#define DESC_RS              (1u << 22)
++#define DESC_IE              (1u << 23)
++
++#define RING_N               16
++#define BUF_SIZE             256
++
++/* Driver-ready info half-word, ICL3: none, protocol 2, no boot ACL */
++#define ICL_INFO             (2u << 4)
++
++#define HOST_UUID            "11223344-5566-7788-99aa-bbccddeeff00"
++
++typedef struct T {
++    QTestState *qts;
++    QPCIBus *bus;
++    QPCIDevice *dev;
++    QPCIBar bar;
++    QGuestAllocator alloc;
++    uint64_t tx_ring, rx_ring, tx_buf, rx_buf;
++    unsigned tx_pi, rx_ci, rx_next;
++    char *img;
++} T;
++
++static uint32_t rd(T *t, uint32_t off)
++{
++    return qpci_io_readl(t->dev, t->bar, off);
++}
++
++static void wr(T *t, uint32_t off, uint32_t v)
++{
++    qpci_io_writel(t->dev, t->bar, off, v);
++}
++
++/*
++ * Two tunnel root ports on pcie.0, as an integrated host has them, the
++ * NHI at 00:04.0. @dev1 / @dev2: -device options of a device router on
++ * port 1 / port 2 (bus and port added here), or NULL.
++ */
++static T *t_start2(const char *host_opts, const char *dev1,
++                   const char *dev2)
++{
++    T *t = g_new0(T, 1);
++    int fd = g_file_open_tmp("usb4-icm-icl-XXXXXX", &t->img, NULL);
++    g_autofree char *d1 = dev1 ? g_strdup_printf("-device usb4-device,id=d0,"
++                                                 "bus=u4.0,port=1,%s", dev1)
++                               : g_strdup("");
++    g_autofree char *d2 = dev2 ? g_strdup_printf("-device usb4-device,id=d1,"
++                                                 "bus=u4.0,port=2,%s", dev2)
++                               : g_strdup("");
++
++    g_assert(fd >= 0);
++    g_assert(ftruncate(fd, 1024 * 1024) == 0);
++    close(fd);
++    t->qts = qtest_initf("-machine q35 "
++                         "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-"
++                         "support=off "
++                         "-drive if=none,id=disk0,file=%s,format=raw "
++                         "-drive if=none,id=disk1,file=null-co://,"
++                         "format=raw "
++                         "-device usb4-tunnel-port,id=tp0,bus=pcie.0,"
++                         "addr=0x3,chassis=1,settle-ms=200 "
++                         "-device usb4-tunnel-port,id=tp1,bus=pcie.0,"
++                         "addr=0x5,chassis=2,settle-ms=200 "
++                         "-device usb4-host,id=u4,bus=pcie.0,addr=0x4,"
++                         "tunnel-port=tp0,tunnel-port2=tp1,uuid=" HOST_UUID
++                         ",profile=tb3-ice-lake%s %s %s",
++                         t->img, host_opts ? host_opts : "", d1, d2);
++    pc_alloc_init(&t->alloc, t->qts, ALLOC_NO_FLAGS);
++    t->bus = qpci_new_pc(t->qts, &t->alloc);
++    t->dev = qpci_device_find(t->bus, DEVFN);
++    g_assert(t->dev);
++    qpci_device_enable(t->dev);
++    t->bar = qpci_iomap(t->dev, 0, NULL);
++    return t;
++}
++
++/* a TB3 device router (the TS3 Plus model) and a USB4 one */
++#define TB3_DEV     "dialect=tb3,drive=disk0,serial=QTICL"
++#define USB4_DEV    "dialect=usb4,drive=disk0,serial=QTICL"
++/* the ORICO's ASM2464 model (ICM-PROTOCOL.md 13.3), on port 2 */
++#define ORICO_DEV2  "dialect=usb4,device-model=asm2464,drive=disk1," \
++                    "serial=QTICL2"
++
++static void t_stop(T *t)
++{
++    g_free(t->dev);
++    qpci_free_pc(t->bus);
++    alloc_destroy(&t->alloc);
++    qtest_quit(t->qts);
++    if (t->img) {
++        unlink(t->img);
++    }
++    g_free(t->img);
++    g_free(t);
++}
++
++/* ---- ring 0, raw mode, as the Linux client sets it up ---- */
++
++static void desc_write(T *t, uint64_t ring, unsigned i, uint64_t addr,
++                       uint32_t dw2)
++{
++    uint64_t d = ring + i * 16;
++
++    qtest_writel(t->qts, d, (uint32_t)addr);
++    qtest_writel(t->qts, d + 4, addr >> 32);
++    qtest_writel(t->qts, d + 8, dw2);
++    qtest_writel(t->qts, d + 12, 0);
++}
++
++static void rx_post(T *t, unsigned n)
++{
++    while (n--) {
++        desc_write(t, t->rx_ring, t->rx_ci, t->rx_buf + t->rx_ci * BUF_SIZE,
++                   DESC_RS | DESC_IE);
++        t->rx_ci = (t->rx_ci + 1) % RING_N;
++    }
++    wr(t, RX_RING(0) + RING_INDEX, t->rx_ci);
++}
++
++static void rings_setup(T *t)
++{
++    if (!t->tx_ring) {
++        t->tx_ring = guest_alloc(&t->alloc, RING_N * 16);
++        t->rx_ring = guest_alloc(&t->alloc, RING_N * 16);
++        t->tx_buf = guest_alloc(&t->alloc, RING_N * BUF_SIZE);
++        t->rx_buf = guest_alloc(&t->alloc, RING_N * BUF_SIZE);
++    }
++    t->tx_pi = t->rx_ci = t->rx_next = 0;
++    wr(t, TX_RING(0) + RING_BASE_LO, (uint32_t)t->tx_ring);
++    wr(t, TX_RING(0) + RING_BASE_HI, t->tx_ring >> 32);
++    wr(t, TX_RING(0) + RING_SIZE, RING_N);
++    wr(t, TX_CTRL(0), RING_VALID | RING_RAW);
++    wr(t, RX_RING(0) + RING_BASE_LO, (uint32_t)t->rx_ring);
++    wr(t, RX_RING(0) + RING_BASE_HI, t->rx_ring >> 32);
++    wr(t, RX_RING(0) + RING_SIZE, RING_N | (BUF_SIZE << 16));
++    wr(t, RX_PDF(0), 0xffffffff);
++    wr(t, RX_CTRL(0), RING_VALID | RING_RAW);
++    wr(t, IMR0, (1u << 0) | (1u << 12));
++    rx_post(t, RING_N - 1);
++}
++
++static void rings_stop(T *t)
++{
++    wr(t, IMR0, 0);
++    wr(t, TX_CTRL(0), 0);
++    wr(t, RX_CTRL(0), 0);
++}
++
++static uint32_t crc32c(const uint8_t *p, size_t n)
++{
++    uint32_t c = 0xffffffff;
++
++    while (n--) {
++        c ^= *p++;
++        for (int b = 0; b < 8; b++) {
++            c = (c >> 1) ^ ((c & 1) ? 0x82f63b78 : 0);
++        }
++    }
++    return ~c;
++}
++
++static void tx_frame(T *t, unsigned pdf, const uint32_t *w, unsigned n)
++{
++    uint8_t buf[BUF_SIZE];
++    uint64_t b = t->tx_buf + t->tx_pi * BUF_SIZE;
++
++    for (unsigned i = 0; i < n; i++) {
++        stl_be_p(buf + 4 * i, w[i]);
++    }
++    stl_be_p(buf + 4 * n, crc32c(buf, 4 * n));
++    qtest_memwrite(t->qts, b, buf, 4 * n + 4);
++    desc_write(t, t->tx_ring, t->tx_pi, b,
++               (4 * n + 4) | (pdf << 12) | DESC_RS | DESC_IE);
++    t->tx_pi = (t->tx_pi + 1) % RING_N;
++    wr(t, TX_RING(0) + RING_INDEX, t->tx_pi << 16);
++}
++
++static void icm_cmd(T *t, const uint32_t *w, unsigned n)
++{
++    tx_frame(t, PDF_ICM_CMD, w, n);
++}
++
++static unsigned icm_recv(T *t, uint32_t *w, unsigned *n)
++{
++    unsigned i = t->rx_next, len, pdf;
++    uint32_t dw2;
++    uint8_t buf[BUF_SIZE];
++
++    if (((rd(t, RX_RING(0) + RING_INDEX) >> 16) & 0xffff) == i) {
++        return 0;
++    }
++    dw2 = qtest_readl(t->qts, t->rx_ring + i * 16 + 8);
++    g_assert_cmphex(dw2 & DESC_DD, ==, DESC_DD);
++    len = dw2 & 0xfff;
++    pdf = (dw2 >> 12) & 0xf;
++    g_assert_cmpuint(len, >=, 8);
++    g_assert_cmpuint(len, <=, BUF_SIZE);
++    qtest_memread(t->qts, t->rx_buf + i * BUF_SIZE, buf, len);
++    g_assert_cmphex(crc32c(buf, len - 4), ==,
++                    (uint32_t)ldl_be_p(buf + len - 4));
++    *n = len / 4 - 1;
++    for (unsigned k = 0; k < *n; k++) {
++        w[k] = (uint32_t)ldl_be_p(buf + 4 * k);
++    }
++    t->rx_next = (i + 1) % RING_N;
++    rx_post(t, 1);
++    return pdf;
++}
++
++static unsigned icm_expect(T *t, unsigned pdf, uint32_t *w)
++{
++    unsigned n = 0, got = icm_recv(t, w, &n);
++
++    g_assert_cmpuint(got, ==, pdf);
++    return n;
++}
++
++static void icm_expect_none(T *t)
++{
++    uint32_t w[64];
++    unsigned n;
++
++    g_assert_cmpuint(icm_recv(t, w, &n), ==, 0);
++}
++
++static uint32_t mailbox(T *t, uint8_t cmd)
++{
++    wr(t, INMAIL_DATA, 0);
++    wr(t, INMAIL_CMD, (1u << 31) | cmd);
++    return rd(t, INMAIL_CMD);
++}
++
++/*
++ * Bind as the Linux Ice Lake client does (ICM-ICE-LAKE.md 3.1): force
++ * power through VS_CAP_22 and wait for VS_CAP_9 FW_READY (pci.c
++ * icl_nhi_force_power), LTR (icl_nhi_set_ltr), then driver ready; no
++ * operating-mode check and no allow-all mailbox command.
++ */
++static void icm_bind(T *t, uint32_t *resp)
++{
++    uint32_t dr = 0x00000003, v;
++
++    v = qpci_config_readl(t->dev, VS_CAP_22);
++    v = (v & ~0xff000000u) | (0x22u << 24) | 2;
++    qpci_config_writel(t->dev, VS_CAP_22, v);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_9) & 0x80000000u, ==,
++                    0x80000000u);
++    v = qpci_config_readl(t->dev, VS_CAP_16) & 0xffff;
++    qpci_config_writel(t->dev, VS_CAP_15, (v << 16) | v);
++    g_assert_cmphex(rd(t, FW_STS) & 0x80000001, ==, 0x80000001);
++    rings_setup(t);
++    icm_cmd(t, &dr, 1);
++    /* ICL3: the Titan Ridge four-word response */
++    g_assert_cmpuint(icm_expect(t, PDF_ICM_RESP, resp), ==, 4);
++}
++
++/*
++ * Control packet Read Request (Spec 6.4): @cs 1 adapter, 2 router, @n
++ * dwords at @off. Returns the PDF of the answer, data in @v.
++ */
++static unsigned cfg_readn(T *t, uint64_t route, unsigned cs, unsigned adp,
++                          unsigned off, unsigned n, uint32_t *v)
++{
++    uint32_t f[3], w[64];
++    unsigned pdf, got = 0;
++
++    f[0] = route >> 32;
++    f[1] = (uint32_t)route;
++    f[2] = off | (n << 13) | (adp << 19) | (cs << 25);
++    tx_frame(t, PDF_READ, f, 3);
++    pdf = icm_recv(t, w, &got);
++    if (pdf == PDF_READ) {
++        g_assert_cmpuint(got, ==, 3 + n);
++        memcpy(v, &w[3], 4 * n);
++    }
++    return pdf;
++}
++
++static unsigned cfg_read(T *t, uint64_t route, unsigned cs, unsigned adp,
++                         unsigned off, uint32_t *v)
++{
++    return cfg_readn(t, route, cs, adp, off, 1, v);
++}
++
++/* ---- PCI and fabric helpers ---- */
++
++static bool gate_open_at(QTestState *qts, const char *path)
++{
++    QDict *rsp = qtest_qmp(qts, "{'execute': 'qom-get', 'arguments': "
++                           "{'path': %s, 'property': 'endpoint'}}", path);
++    bool open = strstr(qdict_get_str(rsp, "return"), "gate=open") != NULL;
++
++    qobject_unref(rsp);
++    return open;
++}
++
++static bool gate_opens_at(QTestState *qts, const char *path)
++{
++    for (int i = 0; i < 50; i++) {
++        if (gate_open_at(qts, path)) {
++            return true;
++        }
++        qtest_clock_step(qts, 100 * 1000 * 1000);
++    }
++    return false;
++}
++
++/*
++ * ICL4: a 63-word device-connected event (Titan Ridge layout) with
++ * header flags @flags and link info @info. Name block entries: vendor,
++ * model, the Intel entry and, for a TB3 router only, the 0x12 entry.
++ * Returns the connection id.
++ */
++static unsigned check_connected(const uint32_t *w, unsigned n,
++                                unsigned flags, uint64_t route,
++                                uint16_t info, uint32_t *uuid)
++{
++    static const uint8_t type[] = { 0x01, 0x02, 0x10, 0x12 };
++    bool usb4 = flags != 0xb1;
++    uint8_t blk[55 * 4];
++    unsigned pos = 0;
++
++    g_assert_cmpuint(n, ==, 63);
++    g_assert_cmphex(w[0], ==, 0x01000003 | (flags << 8));
++    g_assert_cmphex(w[3], ==, 0xffffffff);
++    g_assert_cmphex(w[4], ==, 0xffffffff);
++    g_assert_cmphex(w[5], ==, (uint32_t)(route >> 32));
++    g_assert_cmphex(w[6], ==, (uint32_t)route);
++    g_assert_cmphex(w[7] & 0xff00, ==, 0);
++    g_assert_cmphex(w[7] >> 16, ==, info);
++    for (unsigned i = 0; i < 55; i++) {
++        stl_le_p(blk + 4 * i, w[8 + i]);
++    }
++    for (unsigned k = 0; k < (usb4 ? 3 : 4); k++) {
++        g_assert_cmpuint(blk[pos], >=, 2);
++        g_assert_cmphex(blk[pos + 1], ==, type[k]);
++        if (k == 2) {
++            /* Intel entry flags: bit 1 = USB4 router (13.3) */
++            g_assert_cmphex(blk[pos + 7] & 2, ==, usb4 ? 2 : 0);
++        }
++        pos += blk[pos];
++    }
++    for (; pos < sizeof(blk); pos++) {
++        g_assert_cmphex(blk[pos], ==, 0);
++    }
++    memcpy(uuid, &w[1], 16);
++    return w[7] & 0xff;
++}
++
++/* ---- tests ---- */
++
++/* ICL1: PCI identity, host router identity and layout */
++static void test_identity(void)
++{
++    T *t = t_start2(NULL, NULL, NULL);
++    uint32_t v;
++
++    g_assert_cmphex(qpci_config_readw(t->dev, PCI_VENDOR_ID), ==, 0x8086);
++    g_assert_cmphex(qpci_config_readw(t->dev, PCI_DEVICE_ID), ==, 0x8a17);
++    g_assert_cmphex(qpci_config_readb(t->dev, PCI_REVISION_ID), ==, 3);
++    g_assert_cmphex(qpci_config_readl(t->dev, PCI_CLASS_REVISION) >> 8,
++                    ==, 0x088000);
++    g_assert_cmphex(rd(t, HI_CAPS), ==, 0x0000000c);
++    g_assert_cmphex(rd(t, FW_STS), ==, 0x800001a1);
++    /* the PCIe capability is below the VS registers */
++    g_assert_cmphex(qpci_config_readb(t->dev, 0x40), ==, PCI_CAP_ID_EXP);
++
++    /* ROUTER_CS_0 is the NHI ID (generation 3 in Linux switch.c) */
++    rings_setup(t);
++    g_assert_cmpuint(cfg_read(t, 0, 2, 0, 0, &v), ==, PDF_READ);
++    g_assert_cmphex(v, ==, 0x8a178086);
++    g_assert_cmpuint(cfg_read(t, 0, 2, 0, 1, &v), ==, PDF_READ);
++    g_assert_cmpuint((v >> 8) & 0x3f, ==, 5);
++    g_assert_cmpuint((v >> 14) & 0x3f, ==, 11);
++    /* ICL7: the Titan Ridge 4C layout, two Thunderbolt ports */
++    g_assert_cmpuint(cfg_read(t, 0, 1, 3, 2, &v), ==, PDF_READ);
++    g_assert_cmphex(v, ==, 0x01000001);
++    g_assert_cmpuint(cfg_read(t, 0, 1, 9, 2, &v), ==, PDF_READ);
++    g_assert_cmphex(v, ==, 0x01100101);
++    g_assert_cmpuint(cfg_read(t, 0, 1, 6, 2, &v), ==, PDF_ERROR);
++    t_stop(t);
++
++    /* NHI1 */
++    t = t_start2(",host-domain=1", NULL, NULL);
++    g_assert_cmphex(qpci_config_readw(t->dev, PCI_DEVICE_ID), ==, 0x8a0d);
++    rings_setup(t);
++    g_assert_cmpuint(cfg_read(t, 0, 2, 0, 0, &v), ==, PDF_READ);
++    g_assert_cmphex(v, ==, 0x8a0d8086);
++    t_stop(t);
++}
++
++/* ICL2: the vendor-specific PCI config registers */
++static void test_vs_cap(void)
++{
++    T *t = t_start2(NULL, NULL, NULL);
++    uint32_t v;
++
++    /* reset: no force power, firmware not reported ready */
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_22), ==, 0);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_9), ==, 0);
++    /* host UUID dwords 0 and 1, as the link controller reports them */
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_10), ==, 0x44332211);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_11), ==, 0x88776655);
++    rings_setup(t);
++    g_assert_cmpuint(cfg_read(t, 0, 2, 0, 0x102, &v), ==, PDF_READ);
++    g_assert_cmphex(v, ==, 0x44332211);
++    g_assert_cmpuint(cfg_read(t, 0, 2, 0, 0x103, &v), ==, PDF_READ);
++    g_assert_cmphex(v, ==, 0x88776655);
++
++    /* force power with DMA delay 0x22: ready; off again: not ready */
++    qpci_config_writel(t->dev, VS_CAP_22, 0x22000002);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_22), ==, 0x22000002);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_9), ==, 0x80000000);
++    qpci_config_writel(t->dev, VS_CAP_22, 0x22000000);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_9), ==, 0);
++
++    /* LTR: maximum read-only, programmed value stored */
++    v = qpci_config_readl(t->dev, VS_CAP_16);
++    g_assert_cmphex(v & 0xffff, !=, 0);
++    qpci_config_writel(t->dev, VS_CAP_16, 0);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_16), ==, v);
++    qpci_config_writel(t->dev, VS_CAP_15, (v << 16) | (v & 0xffff));
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_15), ==,
++                    (v << 16) | (v & 0xffff));
++
++    /* LC mailbox: PREPARE_FOR_RESET (0x21) completes, cleared after */
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_18), ==, 0);
++    qpci_config_writel(t->dev, VS_CAP_19, (0x21 << 1) | 1);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_18) & 1, ==, 1);
++    qpci_config_writel(t->dev, VS_CAP_19, 0);
++    g_assert_cmphex(qpci_config_readl(t->dev, VS_CAP_18) & 1, ==, 0);
++    t_stop(t);
++}
++
++/* ICL3: driver ready, and the commands the Ice Lake client never sends */
++static void test_driver_ready(void)
++{
++    uint32_t w[64], cmd[33] = { 0 };
++    T *t = t_start2(NULL, NULL, NULL);
++
++    icm_bind(t, w);
++    g_assert_cmphex(w[0] & 0xffff00ff, ==, 0x01000003);
++    g_assert_cmphex(w[1], ==, ICL_INFO << 16);
++    g_assert_cmphex(w[3], ==, 0x8a17);
++    icm_expect_none(t);
++
++    /* no boot ACL (no get/set_boot_acl in icm_icl_ops): error */
++    cmd[0] = 0x00000018;
++    icm_cmd(t, cmd, 33);
++    icm_expect(t, PDF_ICM_RESP, w);
++    g_assert_cmphex(w[0] & 0xff, ==, 0x18);
++    g_assert_cmphex((w[0] >> 8) & 1, ==, 1);
++    /* get route, USB4 router operation (protocol version 2): error */
++    cmd[0] = 0x0000000a;
++    cmd[1] = 0x00110000;
++    icm_cmd(t, cmd, 2);
++    icm_expect(t, PDF_ICM_RESP, w);
++    g_assert_cmphex(w[0], ==, 0x0100010a);
++    cmd[0] = 0x00000020;
++    icm_cmd(t, cmd, 1);
++    icm_expect(t, PDF_ICM_RESP, w);
++    g_assert_cmphex(w[0], ==, 0x01000120);
++    t_stop(t);
++}
++
++/*
++ * ICL4, ICL5, ICL6: a TB3 dock on port 1 and a USB4 device router on
++ * port 2. Security none: the firmware tunnels both at power-on and
++ * announces them approved; the host reads each router's header at the
++ * route in its event while the firmware owns the fabric.
++ */
++static void test_devices(void)
++{
++    uint32_t w[64], v[5], uuid[4], uuid2[4];
++    unsigned n;
++    T *t = t_start2(NULL, TB3_DEV, ORICO_DEV2);
++
++    g_assert_true(gate_opens_at(t->qts, TP_PATH));
++    g_assert_true(gate_opens_at(t->qts, TP1_PATH));
++    icm_bind(t, w);
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    check_connected(w, n, 0xb1, 1, 0x0911, uuid);
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    check_connected(w, n, 0xa8, 3, 0x0913, uuid2);
++    icm_expect_none(t);
++    /* USB4 router: UID high then low from ROUTER_CS_8, ROUTER_CS_7 */
++    g_assert_cmphex(uuid2[0], ==, 0x70912700);
++    g_assert_cmphex(uuid2[1], ==, 0x174c608e);
++
++    /* ICL6: ROUTER_CS_0-4 at route 1 (TB3) and route 3 (USB4) */
++    g_assert_cmpuint(cfg_readn(t, 1, 2, 0, 0, 5, v), ==, PDF_READ);
++    g_assert_cmphex(v[0], ==, 0x15d38086);
++    g_assert_cmphex(v[2], ==, 1);
++    g_assert_cmphex(v[4] >> 24, ==, 0x02);       /* TB3: not USB4 */
++    g_assert_cmpuint(cfg_readn(t, 3, 2, 0, 0, 5, v), ==, PDF_READ);
++    g_assert_cmphex(v[0], ==, 0x2463174c);
++    g_assert_cmphex(v[2], ==, 3);                /* route low */
++    g_assert_cmphex(v[3], ==, 0x80000000);
++    g_assert_cmphex(v[4], ==, 0x200000fe);       /* USB4 Version 1.0 */
++    /* a single-dword read of ROUTER_CS_4, as xHCI98's client does */
++    g_assert_cmpuint(cfg_read(t, 3, 2, 0, 4, v), ==, PDF_READ);
++    g_assert_cmphex(v[0] >> 24, ==, 0x20);
++    /* no router at route 5: no answer the client could take as one */
++    g_assert_cmpuint(cfg_read(t, 5, 2, 0, 4, v), !=, PDF_READ);
++
++    /* ICL5: unplug, 3-word disconnected with the route, gate closed */
++    qtest_qmp_device_del_send(t->qts, "d1");
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    g_assert_cmpuint(n, ==, 3);
++    g_assert_cmphex(w[0], ==, 0x01000004);
++    g_assert_cmphex(w[2], ==, 3);
++    g_assert_false(gate_open_at(t->qts, TP1_PATH));
++    g_assert_true(gate_open_at(t->qts, TP_PATH));
++
++    /* hot plug of a USB4 router while the driver is ready */
++    qtest_qmp_device_add(t->qts, "usb4-device", "d1",
++                         "{'bus': 'u4.0', 'port': 2, 'dialect': 'usb4', "
++                         "'drive': 'disk1', 'serial': 'QTICL2'}");
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    check_connected(w, n, 0xa8, 3, 0x0913, uuid2);
++    g_assert_true(gate_opens_at(t->qts, TP1_PATH));
++    g_assert_cmpuint(cfg_read(t, 3, 2, 0, 4, v), ==, PDF_READ);
++    g_assert_cmphex(v[0] >> 24, ==, 0x20);
++
++    /* runtime suspend and resume: driver unloads, driver ready */
++    rings_stop(t);
++    g_assert_cmphex(mailbox(t, 0x07), ==, 0x07);
++    qpci_config_writel(t->dev, VS_CAP_19, (0x21 << 1) | 1);
++    qpci_config_writel(t->dev, VS_CAP_19, 0);
++    qpci_config_writel(t->dev, VS_CAP_22, 0x22000000);
++    icm_bind(t, w);
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    check_connected(w, n, 0xb1, 1, 0x0911, uuid);
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    check_connected(w, n, 0xa8, 3, 0x0913, uuid2);
++    g_assert_true(gate_open_at(t->qts, TP_PATH));
++    g_assert_true(gate_open_at(t->qts, TP1_PATH));
++    t_stop(t);
++}
++
++/* ICL8: security=user keeps the shared Titan Ridge approve */
++static void test_security_user(void)
++{
++    uint32_t w[64], uuid[4], cmd[8];
++    unsigned n, id;
++    T *t = t_start2(",security=user", USB4_DEV, NULL);
++
++    icm_bind(t, w);
++    g_assert_cmphex(w[1], ==, (ICL_INFO | 1) << 16);
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    id = check_connected(w, n, 0xa8, 1, 0x0811, uuid);
++    g_assert_false(gate_open_at(t->qts, TP_PATH));
++    cmd[0] = 0x00000004;
++    memcpy(&cmd[1], uuid, 16);
++    cmd[5] = 0;
++    cmd[6] = 1;
++    cmd[7] = id;
++    icm_cmd(t, cmd, 8);
++    g_assert_cmpuint(icm_expect(t, PDF_ICM_RESP, w), ==, 8);
++    g_assert_cmphex(w[0], ==, 0x01000004);
++    g_assert_true(gate_open_at(t->qts, TP_PATH));
++    t_stop(t);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    qtest_add_func("/usb4-icm-icl/identity", test_identity);
++    qtest_add_func("/usb4-icm-icl/vs-cap", test_vs_cap);
++    qtest_add_func("/usb4-icm-icl/driver-ready", test_driver_ready);
++    qtest_add_func("/usb4-icm-icl/devices", test_devices);
++    qtest_add_func("/usb4-icm-icl/security-user", test_security_user);
++    return g_test_run();
++}
 diff --git a/tests/qtest/usb4-icm-test.c b/tests/qtest/usb4-icm-test.c
 new file mode 100644
 index 0000000000000000000000000000000000000000..44a01a0e45ff736c93c1d2cb92ce44c3cc8f3000
@@ -30617,10 +31465,10 @@ index 0000000000000000000000000000000000000000..44a01a0e45ff736c93c1d2cb92ce44c3
 +}
 diff --git a/tests/qtest/usb4-icm-tr-test.c b/tests/qtest/usb4-icm-tr-test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..3fe17ffe1c43e6f9006413a345bb8fe75a754be2
+index 0000000000000000000000000000000000000000..3321766da7ffbddd5d5b8a802ff7bd3b2d519578
 --- /dev/null
 +++ b/tests/qtest/usb4-icm-tr-test.c
-@@ -0,0 +1,1157 @@
+@@ -0,0 +1,1192 @@
 +/*
 + * QTest for the tb3-titan-ridge profile of usb4-host: the Titan Ridge
 + * variant of the emulated firmware connection manager (ICM)
@@ -31758,6 +32606,40 @@ index 0000000000000000000000000000000000000000..3fe17ffe1c43e6f9006413a345bb8fe7
 +    t_stop(t);
 +}
 +
++/*
++ * A USB4 device router (the ORICO's ASM2464 model) behind Titan Ridge,
++ * as ICM-PROTOCOL.md 13.3 observed it behind Alpine Ridge (shared,
++ * inferred for Titan Ridge): announced with the USB4 flags, and its
++ * router header, USB4 Version included, readable at the event's route
++ * by a host Read Request while the firmware owns the fabric.
++ */
++static void test_usb4_device(void)
++{
++    uint32_t w[64], v;
++    unsigned n;
++    T *t = t_start(NULL, false);
++
++    icm_bind(t, w);
++    icm_expect_none(t);
++    qtest_qmp_device_add(t->qts, "usb4-device", "d0",
++                         "{'bus': 'u4.0', 'port': 1, 'dialect': 'usb4', "
++                         "'device-model': 'asm2464', 'drive': 'disk0', "
++                         "'serial': 'QTTR'}");
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    g_assert_cmpuint(n, ==, 63);
++    g_assert_cmphex(w[0], ==, 0x0100a803);
++    g_assert_cmphex(w[1], ==, 0x70912700);
++    g_assert_cmphex(w[2], ==, 0x174c608e);
++    g_assert_cmphex(w[6], ==, 1);
++    g_assert_cmphex(w[7] >> 16, ==, 0x0811);
++    g_assert_cmpuint(cfg_read(t, 1, 2, 0, 0, &v), ==, PDF_READ);
++    g_assert_cmphex(v, ==, 0x2463174c);
++    g_assert_cmpuint(cfg_read(t, 1, 2, 0, 4, &v), ==, PDF_READ);
++    g_assert_cmphex(v, ==, 0x200000fe);
++    g_assert_false(gate_open(t->qts));
++    t_stop(t);
++}
++
 +int main(int argc, char **argv)
 +{
 +    g_test_init(&argc, &argv, NULL);
@@ -31769,6 +32651,7 @@ index 0000000000000000000000000000000000000000..3fe17ffe1c43e6f9006413a345bb8fe7
 +    qtest_add_func("/usb4-icm-tr/device-user", test_device_user);
 +    qtest_add_func("/usb4-icm-tr/port2", test_port2);
 +    qtest_add_func("/usb4-icm-tr/device-none", test_device_none);
++    qtest_add_func("/usb4-icm-tr/usb4-device", test_usb4_device);
 +    qtest_add_func("/usb4-icm-tr/preboot", test_preboot);
 +    qtest_add_func("/usb4-icm-tr/power", test_power);
 +    qtest_add_func("/usb4-icm-tr/unsupported-full", test_unsupported_full);
