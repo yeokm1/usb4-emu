@@ -334,9 +334,12 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
   - [ ] Windows 11 suspend and resume: owed. The guest offers no S3 ("An internal system
     component has disabled this standby state: Graphics", the basic display adapter on
     `-vga std`) and no S0 low power idle.
-  - Finding: across Linux S3 the NVMe in the PCIe tunnel does not keep its device (the
-    model replaces the endpoint when Linux bounces the PCIe paths on resume and pciehp
-    removes it); see GUEST-EXITS.md "S3 and the PCIe tunnel". Owner question.
+  - Finding: across Linux S3 the NVMe in the PCIe tunnel did not keep its device (the
+    model replaced the endpoint when Linux bounced the PCIe paths on resume and pciehp
+    removed it). Resolved 2026-10-22 by the link retrain (owner decision; ARCHITECTURE.md
+    4.4 "Link retrain", `link-retrain` on the PCIe tunnel slots): the NVMe keeps its
+    `pci_dev` and data across Linux S3 on `usb4-generic` (GUEST-EXITS.md, "With the link
+    retrain"); qtest `usb4-retrain-test`.
 
 ## Later, unscheduled
 

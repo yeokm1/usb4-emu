@@ -303,7 +303,9 @@ A PCIe tunnel between the host PCIe down adapter and the device PCIe up adapter 
 
 Transitions: `up`, `admin-down` (CM cleared a path or an enable, or ICM disconnect-PCIe-
 paths), `eject` (orderly unplug), `surprise` (device removed while the tunnel was up). The
-evaluator never touches QEMU PCI state. A QMP test command can force `admin-down` so the
+evaluator never touches QEMU PCI state. Whether a down transition removes the endpoint or
+keeps it for a link retrain is decided by the PCI integration (4.4, "Link retrain"), from
+the router's attachment life, not from the reason. A QMP test command can force `admin-down` so the
 teardown path is testable on the AR profile.
 
 ### 4.4 PCI integration
@@ -344,7 +346,8 @@ teardown path is testable on the AR profile.
   secondary bus through QEMU's existing hot-plug handlers, after the gate is opened.
 - **Access gating is separate from guest-visible removal.** QEMU's SHPC and PCIe
   hot-unplug are requests: the guest may delay or ignore the eject, so unplug alone does
-  not block the endpoint. Every down transition therefore runs four stages. Only stage 1
+  not block the endpoint. Every down transition therefore runs four stages, except a link
+  retrain (below), which runs stages 1 and 2 and keeps the endpoint. Only stage 1
   is synchronous; the rest run from a bottom half, because realisation, reset and removal
   are not safe inside a register write callback.
 
@@ -391,7 +394,7 @@ teardown path is testable on the AR profile.
      the eject, immediately on `surprise`, or after a timeout if the guest never responds.
 
 - **Reconnection while a removal is pending.** An `up` always realises a fresh endpoint,
-  never re-opens the old one. Two kinds of late work could otherwise hit the replacement:
+  never re-opens the old one, except an `up` that completes a link retrain (below). Two kinds of late work could otherwise hit the replacement:
   - *Emulator work* (removal timeouts, deferred unrealise). Each endpoint instance has a
     generation number; this work carries the generation it was issued for and does
     nothing if that no longer matches the slot's occupant.
@@ -441,6 +444,69 @@ teardown path is testable on the AR profile.
     only when both allow it. A command
     arriving after insertion applies to the replacement, which is also what real hardware
     does with a command issued after the guest saw the slot empty and refilled.
+- **Link retrain (owner decision, 2026-10-22).** A tunnel to the same device router that
+  goes down and comes back up, with the router never unplugged in between, keeps its
+  endpoint. Linux does this on every S3 resume: `tb_tunnel_restart()` deactivates each
+  path before it activates it again (with a 500 ms sleep before a USB3 tunnel), and under
+  QEMU the machine's wakeup reset has already reset every router, so Linux configures them
+  again and rebuilds the tunnel. On real hardware the NVMe behind it keeps its `pci_dev`
+  [inferred: Linux's pciehp clears the link events in `pciehp_resume_noirq()` and keeps a
+  device whose vendor, device and serial number match; not captured]. Before this
+  decision the model surprise-removed the endpoint and Linux lost the disk
+  (GUEST-EXITS.md, "S3 and the PCIe tunnel"). The tunnel bridges' `link-retrain`
+  property selects the behaviour:
+  - *Which down transitions qualify.* One signalled by the fabric (a CM, or the reset
+    below; never the `tunnel` property or the test harness, which are stimuli), for an
+    endpoint that is live and was inserted for that router in its current *attachment
+    life*. A router gets a new attachment life when it is plugged in, when its upstream
+    link is lost (an unplug, `x-cable=false`, a Downstream Port Reset), and on every host
+    router reset (Spec 6.10: every DFP disconnected), whether the guest's, an injected one
+    or a cold machine reset. The one exception is the machine's S3 wakeup reset
+    (`RESET_TYPE_WAKEUP`): it resets the routers' configuration as any host router reset
+    does, but a router that stayed attached keeps its life, because to the CM it is the
+    same router (Linux keeps a router whose UID matches across resume). An endpoint that a
+    firmware CM (ICM, `preos-cm`) keeps live across a cold reset, its tunnel never going
+    down, stands from then on for the router in the life the reset began (on a host
+    port and behind a daisy-chain port alike), so the OS CM's later teardown and rebuild
+    to it is a retrain.
+  - *What happens.* Stage 1 as for any down transition (the gate closes in the call).
+    On a PCIe slot (`usb4-tunnel-port`, `usb4-tunnel-dsp`) the link goes down: Data Link
+    Layer Link Active clears and DLLSC is signalled; Presence Detect State stays set.
+    Stage 2 resets the endpoint with a function reset, configuration space included
+    (BARs, Command), because a link going down (DL_Down) on an Upstream Port resets the
+    function as a hot reset does [PCIe Base Spec; inferred, not captured], and drains its
+    I/O; the cutoff event follows as for any stage 2. Stages 3 and 4 do not run: the
+    endpoint is held (`retrain-held`), with no timeout, for as long as its router keeps
+    its attachment life.
+  - *The tunnel back up.* An `up` from the fabric to the same router in the same
+    attachment life reopens the gate and brings the link up (DLLLA set, DLLSC); the
+    endpoint is live again (`retrained`) with the same generation and the same QOM object.
+    The guest restores configuration space, as after any link loss (Linux in
+    `pci_pm_resume_noirq()`). An `up` that arrives before the bottom half has reset the
+    endpoint waits for the reset: the endpoint is reset on every retrain.
+  - *Everything else ends the retrain* and the rules above apply. The router's attachment
+    life changes (unplug, link loss, host router reset, cold reset): the endpoint is
+    surprise-removed at once. The tunnel comes back to another router, or from a stimulus:
+    the reconnection rule (forced removal, empty-slot acknowledge or settle timeout, a
+    fresh endpoint). A down stimulus (`tunnel` property, harness) while the endpoint is
+    held: the retrain ends and the stimulus's reason applies (removal, or the eject
+    request). The guest turns the slot off while the endpoint is held (Linux's
+    pciehp does on a runtime Link Down, which removes its `pci_dev`): the guest slot
+    command rule removes it, and the tunnel coming back inserts a fresh endpoint, which
+    waits for the guest to power the slot.
+  - *Precedence.* A retrain takes precedence over `orderly-admin-down`, which applies only
+    to down transitions that are not retrains.
+  - *Defaults.* On for `usb4-tunnel-port` and `usb4-tunnel-dsp` and their subclasses
+    (PCIe native hot-plug: the link state tells the guest the endpoint was reset). Off
+    for `usb4-tunnel-bridge` and its subclasses (`usb4-tb3-tunnel-bridge`,
+    `usb4-tr-tunnel-bridge`, `usb4-asm-tunnel-bridge`): SHPC has no Data Link Layer state,
+    so a reset endpoint behind an unchanged slot could not be reported, and xHCI98's
+    legacy Windows kits launch these lines with no property, take the tunnel down for a
+    safe eject expecting the endpoint to go, and copy this repository's main build
+    automatically (`scripts/usb4/run-usb4-guest.ps1`). `link-retrain=off` on a PCIe slot
+    restores the earlier contract (the hot-plug tests use it); `link-retrain=on` on an
+    SHPC bridge holds and resets the endpoint with no guest-visible event, for
+    experiments only.
 - Toggling PCIe link status bits alone is not enough: QEMU handles slot presence, BAR
   mapping and bus mastering separately, and `pci_set_enabled()` resets the device.
 
