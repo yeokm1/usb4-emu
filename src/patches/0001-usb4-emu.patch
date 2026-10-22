@@ -1,7 +1,7 @@
 usb4-emu QEMU changes against v11.1.2
-Exported from branch usb4-emu at 46d96fb
+Exported from branch usb4-emu at 9b5db6e
 
-  46d96fb usb4: link retrain of a PCIe tunnel to the same router, qtest
+  9b5db6e usb4: AR Device Serial Number, MSI-X vector qtest, P14s replay, EEPROM read-back
   5bb712d tests/qtest: usb4-host M1 exit matrix and the Linux single-MSI path
   c8d878e usb4: USB3 tunnel gate, hub subtrees, x-usb3-tunnel, preos-usb3, qtest
   f381f01 usb4: QMP fault injection on ring 0, x-cable, host resets, ICM mode
@@ -1725,7 +1725,7 @@ index 2a7fdfa5636e0c9dac67bc4c608258599620e0fe..004eee0aa333cd115d6a8604bacf4988
      }
  
 diff --git a/hw/pci/pcie.c b/hw/pci/pcie.c
-index 4622c75e48cca3158a2da88ea2222b77561c760f..c64df55a07ddac2994e5bbd2082e4b5efa689559 100644
+index 4622c75e48cca3158a2da88ea2222b77561c760f..220d58bdb17f46801b1c8a8c013c970d27f4614c 100644
 --- a/hw/pci/pcie.c
 +++ b/hw/pci/pcie.c
 @@ -404,7 +404,9 @@ static void hotplug_event_update_event_status(PCIDevice *dev)
@@ -1920,7 +1920,7 @@ index 4622c75e48cca3158a2da88ea2222b77561c760f..c64df55a07ddac2994e5bbd2082e4b5e
  }
  
  int pcie_cap_slot_post_load(void *opaque, int version_id)
-@@ -923,6 +991,113 @@ int pcie_cap_slot_post_load(void *opaque, int version_id)
+@@ -923,6 +991,82 @@ int pcie_cap_slot_post_load(void *opaque, int version_id)
      return 0;
  }
  
@@ -1971,37 +1971,6 @@ index 4622c75e48cca3158a2da88ea2222b77561c760f..c64df55a07ddac2994e5bbd2082e4b5e
 +                               PCI_EXP_SLTCTL_DLLSCE);
 +    pci_word_test_and_set_mask(dev->w1cmask + pos + PCI_EXP_SLTSTA,
 +                               PCI_EXP_SLTSTA_DLLSC);
-+}
-+
-+/*
-+ * The link behind an occupied slot went down or came back up without the
-+ * device leaving (a link retrain): Data Link Layer Link Active follows
-+ * it and, with DLLSC reporting enabled (pcie_cap_slot_enable_dllsc),
-+ * Data Link Layer State Changed is signalled (PCIe Base Spec 4.0
-+ * sections 7.5.3.8 and 7.5.3.11). Presence Detect State is not touched.
-+ */
-+void pcie_cap_slot_link_change(PCIDevice *dev, bool up)
-+{
-+    uint8_t *exp_cap = dev->config + dev->exp.exp_cap;
-+    bool was = pci_get_word(exp_cap + PCI_EXP_LNKSTA) & PCI_EXP_LNKSTA_DLLLA;
-+
-+    if (!(pci_get_long(exp_cap + PCI_EXP_LNKCAP) & PCI_EXP_LNKCAP_DLLLARC) ||
-+        was == up) {
-+        return;
-+    }
-+    if (up) {
-+        pci_word_test_and_set_mask(exp_cap + PCI_EXP_LNKSTA,
-+                                   PCI_EXP_LNKSTA_DLLLA);
-+    } else {
-+        pci_word_test_and_clear_mask(exp_cap + PCI_EXP_LNKSTA,
-+                                     PCI_EXP_LNKSTA_DLLLA);
-+    }
-+    if (pci_get_word(dev->wmask + dev->exp.exp_cap + PCI_EXP_SLTCTL) &
-+        PCI_EXP_SLTCTL_DLLSCE) {
-+        pci_word_test_and_set_mask(exp_cap + PCI_EXP_SLTSTA,
-+                                   PCI_EXP_SLTSTA_DLLSC);
-+        hotplug_event_notify(dev);
-+    }
 +}
 +
 +void pcie_cap_slot_set_presence(PCIDevice *dev, bool present, bool notify)
@@ -2230,10 +2199,10 @@ index 0000000000000000000000000000000000000000..bfa1b78b351254e9fa4f58a3870554fa
 +))
 diff --git a/hw/usb4/trace-events b/hw/usb4/trace-events
 new file mode 100644
-index 0000000000000000000000000000000000000000..233eae49644d1bf6459316eb3bb73dc1ae74b92e
+index 0000000000000000000000000000000000000000..bdc8815fc9302c1b7ea178e0889da763fc2ec844
 --- /dev/null
 +++ b/hw/usb4/trace-events
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,181 @@
 +# See docs/devel/tracing.rst for syntax documentation.
 +# usb4-emu fabric. Route strings are 64-bit: bit 63 is the CM bit.
 +
@@ -2391,7 +2360,6 @@ index 0000000000000000000000000000000000000000..233eae49644d1bf6459316eb3bb73dc1
 +usb4_preos_end(void) "pre-OS firmware CM: OS took over the host interface"
 +
 +# usb4-harness.c (test harness, docs/HARNESS.md); *_ns: QEMU_CLOCK_HOST and QEMU_CLOCK_VIRTUAL
-+usb4_tp_retrain(const char *port, uint64_t gen, const char *step) "%s: link retrain of gen %" PRIu64 ": %s"
 +usb4_tp_cutoff(const char *port, uint64_t gen, int64_t host_ns, int64_t vm_ns) "%s: stage 2 complete for gen %" PRIu64 " host_ns=%" PRId64 " vm_ns=%" PRId64
 +usb4_tp_namespace(const char *port, uint64_t gen, uint64_t nsid, const char *drive) "%s: gen %" PRIu64 " namespace %" PRIu64 " drive=%s"
 +usb4_h_rules(const char *port, unsigned n) "%s: %u fault rules"
@@ -5021,10 +4989,10 @@ index 0000000000000000000000000000000000000000..ce5f039a2035b2b6a68aa532663becd4
 +}
 diff --git a/hw/usb4/usb4-fabric-int.h b/hw/usb4/usb4-fabric-int.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..69ffbc5daada87b8a346ad2f72c9b712f8f03610
+index 0000000000000000000000000000000000000000..79318133246c91aca567aa98850e4749c6c97e30
 --- /dev/null
 +++ b/hw/usb4/usb4-fabric-int.h
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,702 @@
 +/*
 + * USB4 fabric - private definitions shared by the fabric source files
 + *
@@ -5361,13 +5329,6 @@ index 0000000000000000000000000000000000000000..69ffbc5daada87b8a346ad2f72c9b712
 +    USB4TunnelTrack tunnel;   /* device routers: PCIe tunnel to PCIe Up */
 +    USB4TunnelTrack usb3;     /* device routers: USB3 tunnel to USB3 Up */
 +    USB4Port *tunnel_dfp;     /* parent DFP the tunnel came up through */
-+    /*
-+     * Attachment life: a fresh number when the router is plugged in, when
-+     * its upstream link is lost, and when the host router is reset other
-+     * than by the machine's S3 wakeup; equal lives mean the router was
-+     * never unplugged in between (link retrain, ARCHITECTURE.md 4.4).
-+     */
-+    uint64_t life;
 +    uint32_t cs[USB4_RTR_CS_STORE];
 +    /*
 +     * Captured image (usb4-router-img.c), NULL for a spec-derived router.
@@ -5822,10 +5783,10 @@ index 0000000000000000000000000000000000000000..ed7a7352dd7566835d05a69e004538ef
 +}
 diff --git a/hw/usb4/usb4-fabric.c b/hw/usb4/usb4-fabric.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868dbfda3ee
+index 0000000000000000000000000000000000000000..2bf9a09e71bb853b43fb92bc7e660919a6d1cb63
 --- /dev/null
 +++ b/hw/usb4/usb4-fabric.c
-@@ -0,0 +1,1569 @@
+@@ -0,0 +1,1503 @@
 +/*
 + * USB4 fabric: router tree, control packet routing and processing,
 + * hot plug events, attach/detach and PCIe tunnel evaluation
@@ -5856,18 +5817,6 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +    uint64_t topo = usb4_router_enumerated(r) ? usb4_router_topology(r) : 0;
 +
 +    return topo | USB4_ROUTE_CM_BIT;
-+}
-+
-+/*
-+ * @r starts a new attachment life (USB4Router.life): a retrain held for
-+ * its tunnel no longer applies.
-+ */
-+static void new_life(USB4Router *r)
-+{
-+    static uint64_t lives;
-+
-+    r->life = ++lives;
-+    usb4_tunnel_retrain_recheck();
 +}
 +
 +static void send_notification(USB4Router *r, unsigned event, unsigned info,
@@ -6076,7 +6025,6 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +        if (dfp->partner) {
 +            dfp->partner->bonded = false;
 +            usb4_router_reset(dfp->partner->router);
-+            new_life(dfp->partner->router);
 +            if (dfp->partner->router->asm2464) {
 +                usb4_router_asm2464_link_lost(dfp->partner->router);
 +            }
@@ -6247,13 +6195,6 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +        r = usb4_fabric_parent_router(r);
 +    }
 +    return r != NULL;
-+}
-+
-+uint64_t usb4_device_router_life(USB4Device *d)
-+{
-+    USB4Router *r = d ? usb4_device_get_router(d) : NULL;
-+
-+    return r && usb4_fabric_router_connected(r) ? r->life : 0;
 +}
 +
 +/*
@@ -6948,26 +6889,7 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +    g_free(f);
 +}
 +
-+static void fabric_reset(USB4Fabric *f, bool wakeup);
-+
 +void usb4_fabric_reset(USB4Fabric *f)
-+{
-+    fabric_reset(f, false);
-+}
-+
-+/*
-+ * The machine's S3 wakeup reset: the routers lose their configuration as
-+ * in any host router reset, but a device router that stays attached is
-+ * the same router to the CM (Linux keeps it if its UID matches), so its
-+ * attachment life is kept and a tunnel the CM restores to it is a link
-+ * retrain (ARCHITECTURE.md 4.4).
-+ */
-+void usb4_fabric_wakeup_reset(USB4Fabric *f)
-+{
-+    fabric_reset(f, true);
-+}
-+
-+static void fabric_reset(USB4Fabric *f, bool wakeup)
 +{
 +    if (!f) {
 +        return;
@@ -6988,10 +6910,6 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +    usb4_router_reset(f->hr);
 +    for (unsigned d = 0; d < f->ndr; d++) {
 +        usb4_router_reset(f->dr[d]);
-+        if (!wakeup) {
-+            /* every DFP disconnected: a new attachment (Spec 6.10) */
-+            new_life(f->dr[d]);
-+        }
 +    }
 +    for (unsigned d = 0; d <= f->ndr; d++) {
 +        USB4Router *r = d ? f->dr[d - 1] : f->hr;
@@ -7017,27 +6935,6 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +    usb4_fabric_preos_cm(f);
 +    f->eval_hold = false;
 +    usb4_fabric_reevaluate(f, USB4_TUNNEL_REASON_SURPRISE);
-+    if (wakeup) {
-+        return;
-+    }
-+    /*
-+     * A PCIe tunnel the firmware CM kept up fired no transition: its
-+     * endpoint stands for the router in the new attachment life, so the
-+     * OS CM's later teardown and rebuild is a link retrain (review r2 #2,
-+     * r3 #1; daisy-chained targets included).
-+     */
-+    for (unsigned d = 0; d < f->ndr; d++) {
-+        USB4Router *r = f->dr[d];
-+        USB4TunnelPort *tp;
-+
-+        if (r->tunnel.state != USB4_TUNNEL_UP || !r->tunnel.dev) {
-+            continue;
-+        }
-+        tp = tunnel_target(f, r);
-+        if (tp) {
-+            usb4_tunnel_port_reattach(tp, r->tunnel.dev);
-+        }
-+    }
 +}
 +
 +void usb4_fabric_preos_end(USB4Fabric *f)
@@ -7189,7 +7086,6 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +        usb4_drom_build(r);
 +    }
 +    usb4_router_reset(r);
-+    new_life(r);
 +
 +    f->dr[f->ndr++] = r;
 +    r->ports[0].partner = dfp;
@@ -7268,7 +7164,6 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +        dfp->partner = NULL;
 +    }
 +    usb4_router_reset(r);
-+    new_life(r);
 +    sync_links(f);
 +    usb4_fabric_reevaluate(f, USB4_TUNNEL_REASON_SURPRISE);
 +
@@ -9828,10 +9723,10 @@ index 0000000000000000000000000000000000000000..3e94279e23d6a66baf8f359d4cb2577d
 +#endif
 diff --git a/hw/usb4/usb4-host.c b/hw/usb4/usb4-host.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..aa6112c5da3bb6a59be8288ece6b38815548ea5a
+index 0000000000000000000000000000000000000000..1e314fc3157fe63e53086f2288a57eee529731f1
 --- /dev/null
 +++ b/hw/usb4/usb4-host.c
-@@ -0,0 +1,3251 @@
+@@ -0,0 +1,3276 @@
 +/*
 + * USB4 / Thunderbolt 3 host interface (the "NHI" PCI function)
 + *
@@ -10185,6 +10080,12 @@ index 0000000000000000000000000000000000000000..aa6112c5da3bb6a59be8288ece6b3881
 +    uint32_t usb3_port[2];      /* QEMU USB port on it, per USB4 port */
 +    bool msi_on;
 +    bool msix_on;
++    /*
++     * tb3 profiles on q35: PCIe Device Serial Number capability (R29);
++     * 0 = derived from the uuid property.
++     */
++    bool dsn_on;
++    uint64_t dsn_value;
 +    QemuUUID uuid;
 +    bool loopback;
 +    uint8_t hi_version;
@@ -10284,6 +10185,17 @@ index 0000000000000000000000000000000000000000..aa6112c5da3bb6a59be8288ece6b3881
 +        return ICL_NHI1_DEVICE;
 +    }
 +    return usb4_tb3_ids[s->tb3_host].nhi_device;
++}
++
++/*
++ * R29: the NHI's Device Serial Number. The captured value is a per-unit
++ * serial ([obs] ICM-PROTOCOL.md 10.1); the model derives one from the
++ * uuid property unless dsn-value sets it, so a launcher that passes
++ * either gets a stable Windows identity across boots [emu].
++ */
++static uint64_t usb4_host_dsn(USB4Host *s)
++{
++    return s->dsn_value ? s->dsn_value : ldq_be_p(s->uuid.data);
 +}
 +
 +static uint16_t usb4_tb3_router_device(USB4Host *s)
@@ -12630,6 +12542,15 @@ index 0000000000000000000000000000000000000000..aa6112c5da3bb6a59be8288ece6b3881
 +            error_setg(errp, "usb4-host: PCIe capability init failed");
 +            return;
 +        }
++        if (s->dsn_on) {
++            /*
++             * R29 (ICM-PROTOCOL.md 1, 10.1): the captured NHI's first
++             * extended capability is the Device Serial Number, the same
++             * value as on the controller's switch ports (usb4-tb3-*
++             * dsn-value); Windows builds the instance IDs from it.
++             */
++            pcie_dev_ser_num_init(pd, USB4_DSN_OFFSET, usb4_host_dsn(s));
++        }
 +    } else if (express) {
 +        ret = pcie_endpoint_cap_init(pd, 0xb0);
 +        if (ret < 0) {
@@ -12874,11 +12795,7 @@ index 0000000000000000000000000000000000000000..aa6112c5da3bb6a59be8288ece6b3881
 +        qemu_bh_schedule(s->presence_bh);
 +    }
 +    if (s->fabric) {
-+        if (type == RESET_TYPE_WAKEUP && !cycling) {
-+            usb4_fabric_wakeup_reset(s->fabric);
-+        } else {
-+            usb4_fabric_reset(s->fabric);
-+        }
++        usb4_fabric_reset(s->fabric);
 +        if (s->icm && !cycling) {
 +            usb4_host_assist_functions(s);
 +        }
@@ -12962,6 +12879,9 @@ index 0000000000000000000000000000000000000000..aa6112c5da3bb6a59be8288ece6b3881
 +    DEFINE_PROP_BOOL("msi", USB4Host, msi_on, true),
 +    DEFINE_PROP_BOOL("msix", USB4Host, msix_on, true),
 +    DEFINE_PROP_UUID("uuid", USB4Host, uuid),
++    /* R29: Device Serial Number on the tb3 profiles (q35 only) */
++    DEFINE_PROP_BOOL("dsn", USB4Host, dsn_on, true),
++    DEFINE_PROP_UINT64("dsn-value", USB4Host, dsn_value, 0),
 +    DEFINE_PROP_BOOL("x-loopback", USB4Host, loopback, false),
 +    /* Spec Table 12-11: 0x00 = USB4 1.0 / TBT3, 0x40 = USB4 2.0. */
 +    DEFINE_PROP_UINT8("hi-version", USB4Host, hi_version, 0x00),
@@ -14387,10 +14307,10 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +}
 diff --git a/hw/usb4/usb4-internal.h b/hw/usb4/usb4-internal.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..6f90b467f51d8f5babd184f9fec4d8857a039506
+index 0000000000000000000000000000000000000000..c2d12ad9d627f1f22fe130a7a86d5a52e0908277
 --- /dev/null
 +++ b/hw/usb4/usb4-internal.h
-@@ -0,0 +1,640 @@
+@@ -0,0 +1,618 @@
 +/*
 + * USB4 / Thunderbolt 3 host emulation - internal interfaces
 + *
@@ -14662,8 +14582,6 @@ index 0000000000000000000000000000000000000000..6f90b467f51d8f5babd184f9fec4d885
 +void usb4_fabric_preos_end(USB4Fabric *f);
 +/* Power-on / system reset of the whole fabric (all config spaces). */
 +void usb4_fabric_reset(USB4Fabric *f);
-+/* The same reset from the machine's S3 wakeup (attachments kept). */
-+void usb4_fabric_wakeup_reset(USB4Fabric *f);
 +
 +/*
 + * Device router attach/detach on host USB4 port @port (1-based).
@@ -14738,19 +14656,6 @@ index 0000000000000000000000000000000000000000..6f90b467f51d8f5babd184f9fec4d885
 + * the tunnel port closes its gate before returning (Gate before you
 + * unplug, AGENTS.md); realise/unplug work is deferred to a bottom half.
 + */
-+/*
-+ * A device router started a new attachment life: tunnel targets holding
-+ * an endpoint for a link retrain re-check that its router is still the
-+ * one they hold it for.
-+ */
-+void usb4_tunnel_retrain_recheck(void);
-+/*
-+ * The fabric's tunnel to @dev stayed up through a host router reset (a
-+ * firmware CM rebuilt it within the reset, so no transition fired): a
-+ * live endpoint inserted for @dev's router now stands for it in the
-+ * attachment life the reset began.
-+ */
-+void usb4_tunnel_port_reattach(USB4TunnelPort *p, USB4Device *dev);
 +void usb4_tunnel_port_set_state(USB4TunnelPort *p, USB4Device *dev,
 +                                USB4TunnelState st, USB4TunnelReason why);
 +
@@ -14830,13 +14735,6 @@ index 0000000000000000000000000000000000000000..6f90b467f51d8f5babd184f9fec4d885
 +uint32_t usb4_device_nvme_nn(USB4Device *d);
 +/* Per-device router state lives in the fabric; this is its handle. */
 +void *usb4_device_get_router(USB4Device *d);
-+/*
-+ * The attachment life of @d's router (usb4-fabric.c): 0 when @d has no
-+ * router linked to the host router, else a number that changes whenever
-+ * the router is plugged in, loses its upstream link or goes through a
-+ * host router reset other than the machine's S3 wakeup.
-+ */
-+uint64_t usb4_device_router_life(USB4Device *d);
 +void usb4_device_set_router(USB4Device *d, void *router);
 +
 +/* Host accessors used by usb4-device.c and the tunnel port. */
@@ -16363,10 +16261,10 @@ index 0000000000000000000000000000000000000000..b2cead56ff66a37b2cdc86ac4da34105
 +}
 diff --git a/hw/usb4/usb4-router-tb3.c b/hw/usb4/usb4-router-tb3.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..11158b46574dd8509b058f62871b4654a8c1c51c
+index 0000000000000000000000000000000000000000..45f40cd81c9553760950fadd79793cc3f6b1509a
 --- /dev/null
 +++ b/hw/usb4/usb4-router-tb3.c
-@@ -0,0 +1,1023 @@
+@@ -0,0 +1,1026 @@
 +/*
 + * Thunderbolt 3 (tb3 dialect) router model: the Alpine Ridge or Titan
 + * Ridge host router and a TB3 device router as a firmware connection
@@ -17099,13 +16997,15 @@ index 0000000000000000000000000000000000000000..11158b46574dd8509b058f62871b4654
 +            return xreg_read(off);
 +        }
 +        v = r->cs[off];
-+        if (off == TB3_RTR_EEPROM_CTL && usb4_router_tb3_sw_cm(r) &&
-+            (v & TB3_EE_EN)) {
++        if (off == TB3_RTR_EEPROM_CTL && (v & TB3_EE_EN)) {
 +            /*
-+             * Observed under the software CM: while bit-banging is
-+             * enabled the dword reads only the CM's control bits and the
-+             * data line (0x10, 0x11, 0x18, 0x19 ...); the idle value
-+             * (0x0002218a) is back once it is disabled.
++             * Observed under the software CM (Framework) and the
++             * firmware CM (P14s trace, host and dock: 0x0002218e, then
++             * 0x14, 0x11, 0x19 ... after enabling, 0x0002218a after
++             * disabling; tests/usb4/run-ar-conformance.sh): while
++             * bit-banging is enabled the dword reads only the CM's
++             * control bits and the data line; the idle value is back
++             * once it is disabled.
 +             */
 +            v = (v & (TB3_EE_CLK | TB3_EE_CS | TB3_EE_DO | TB3_EE_EN)) |
 +                (r->eeprom.data_out ? TB3_EE_DI : 0);
@@ -17169,11 +17069,12 @@ index 0000000000000000000000000000000000000000..11158b46574dd8509b058f62871b4654
 +        memset(&r->eeprom, 0, sizeof(r->eeprom));
 +        r->eeprom.active = true;
 +        /*
-+         * The data line while the command is clocked in: high in the
-+         * P14s model; low on the dock under the software CM (observed:
-+         * 0x10 and 0x11 read back until the first data bit).
++         * The data line while the command is clocked in: low (observed
++         * on the dock under the software CM and on the P14s host and
++         * dock under the firmware CM: 0x14, 0x10 and 0x11 read back
++         * until the first data bit).
 +         */
-+        r->eeprom.data_out = !usb4_router_tb3_sw_cm(r);
++        r->eeprom.data_out = false;
 +    }
 +    if ((old & TB3_EE_CLK) || !(new & TB3_EE_CLK)) {
 +        return;             /* not a rising edge */
@@ -19796,10 +19697,10 @@ index 0000000000000000000000000000000000000000..66d776bc0ae998273514fea919f86607
 +};
 diff --git a/hw/usb4/usb4-tb3-switch.c b/hw/usb4/usb4-tb3-switch.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..14efdee05f44ad7c25e5cc2c619e6fbfc3848873
+index 0000000000000000000000000000000000000000..41374c0ca97e30ad96f2360412feb83a0bcff89a
 --- /dev/null
 +++ b/hw/usb4/usb4-tb3-switch.c
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,357 @@
 +/*
 + * Alpine Ridge PCI topology: the controller's PCIe switch and xHCI
 + *
@@ -19837,6 +19738,8 @@ index 0000000000000000000000000000000000000000..14efdee05f44ad7c25e5cc2c619e6fbf
 +#include "qapi/error.h"
 +#include "hw/pci/pci.h"
 +#include "hw/pci/pci_device.h"
++#include "hw/pci/pcie.h"
++#include "qapi/visitor.h"
 +#include "hw/core/qdev.h"
 +#include "hw/usb/xhci.h"
 +#include "hw/usb/hcd-xhci-pci.h"
@@ -19890,6 +19793,68 @@ index 0000000000000000000000000000000000000000..14efdee05f44ad7c25e5cc2c619e6fbf
 +    tb3_switch_ids(klass, ids->port_device, ids->revision);
 +    dc->desc = ids->port_desc;
 +    dc->user_creatable = true;
++}
++
++/*
++ * R29 (docs/ICM-PROTOCOL.md 1, 10.1): every function of the captured
++ * controller carries a PCIe Device Serial Number capability, the switch
++ * ports and the NHI the same value (Windows reports it as each one's
++ * serial and parent serial and builds the instance IDs from it, e.g.
++ * PCI\VEN_8086&DEV_15C0...\<serial><devfn>). On the PCIe port types,
++ * dsn-value adds it (0, the default: none, the behaviour before
++ * 2026-10-22); a launcher passes the usb4-host's dsn-value. Captured at
++ * offset 0x100; QEMU's XIO3130 ports have AER there, so the model puts
++ * it at 0x200 (an emulator choice; Windows and Linux walk the list).
++ */
++#define TB3_PORT_DSN_OFFSET     0x200
++
++static void tb3_port_dsn_get(Object *obj, Visitor *v, const char *name,
++                             void *opaque, Error **errp)
++{
++    visit_type_uint64(v, name, opaque, errp);
++}
++
++static void tb3_port_dsn_set(Object *obj, Visitor *v, const char *name,
++                             void *opaque, Error **errp)
++{
++    if (DEVICE(obj)->realized) {
++        error_setg(errp, "dsn-value cannot change after realize");
++        return;
++    }
++    visit_type_uint64(v, name, opaque, errp);
++}
++
++static void tb3_port_dsn_release(Object *obj, const char *name, void *opaque)
++{
++    g_free(opaque);
++}
++
++static void tb3_port_express_init(Object *obj)
++{
++    object_property_add(obj, "dsn-value", "uint64", tb3_port_dsn_get,
++                        tb3_port_dsn_set, tb3_port_dsn_release,
++                        g_new0(uint64_t, 1));
++}
++
++static void tb3_port_express_realize(DeviceState *dev, Error **errp)
++{
++    ERRP_GUARD();
++    DeviceClass *parent = DEVICE_CLASS(
++        object_class_get_parent(object_get_class(OBJECT(dev))));
++    uint64_t dsn = object_property_get_uint(OBJECT(dev), "dsn-value",
++                                            &error_abort);
++
++    parent->realize(dev, errp);
++    if (*errp || !dsn) {
++        return;
++    }
++    pcie_dev_ser_num_init(PCI_DEVICE(dev), TB3_PORT_DSN_OFFSET, dsn);
++}
++
++static void tb3_port_express_class_init(ObjectClass *klass, const void *data)
++{
++    tb3_port_class_init(klass, data);
++    DEVICE_CLASS(klass)->realize = tb3_port_express_realize;
 +}
 +
 +/*
@@ -20022,18 +19987,21 @@ index 0000000000000000000000000000000000000000..14efdee05f44ad7c25e5cc2c619e6fbf
 +    {
 +        .name = "usb4-tb3-usp",
 +        .parent = "x3130-upstream",
-+        .class_init = tb3_port_class_init,
++        .instance_init = tb3_port_express_init,
++        .class_init = tb3_port_express_class_init,
 +        .class_data = &tb3_ar_ids,
 +    }, {
 +        .name = "usb4-tb3-dsp",
 +        .parent = TYPE_XIO3130_DOWNSTREAM,
-+        .class_init = tb3_port_class_init,
++        .instance_init = tb3_port_express_init,
++        .class_init = tb3_port_express_class_init,
 +        .class_data = &tb3_ar_ids,
 +    }, {
 +        /* the gated hot-plug downstream port for the tunnel */
 +        .name = "usb4-tb3-tunnel-dsp",
 +        .parent = "usb4-tunnel-dsp",
-+        .class_init = tb3_port_class_init,
++        .instance_init = tb3_port_express_init,
++        .class_init = tb3_port_express_class_init,
 +        .class_data = &tb3_ar_ids,
 +    }, {
 +        .name = "usb4-tb3-pci-bridge",
@@ -20054,18 +20022,21 @@ index 0000000000000000000000000000000000000000..14efdee05f44ad7c25e5cc2c619e6fbf
 +    }, {
 +        .name = "usb4-tr-usp",
 +        .parent = "x3130-upstream",
-+        .class_init = tb3_port_class_init,
++        .instance_init = tb3_port_express_init,
++        .class_init = tb3_port_express_class_init,
 +        .class_data = &tb3_tr_ids,
 +    }, {
 +        .name = "usb4-tr-dsp",
 +        .parent = TYPE_XIO3130_DOWNSTREAM,
-+        .class_init = tb3_port_class_init,
++        .instance_init = tb3_port_express_init,
++        .class_init = tb3_port_express_class_init,
 +        .class_data = &tb3_tr_ids,
 +    }, {
 +        /* the gated hot-plug downstream port for the tunnel */
 +        .name = "usb4-tr-tunnel-dsp",
 +        .parent = "usb4-tunnel-dsp",
-+        .class_init = tb3_port_class_init,
++        .instance_init = tb3_port_express_init,
++        .class_init = tb3_port_express_class_init,
 +        .class_data = &tb3_tr_ids,
 +    }, {
 +        .name = "usb4-tr-pci-bridge",
@@ -20143,10 +20114,10 @@ index 0000000000000000000000000000000000000000..0e0917b755144229f6550fd8723f0506
 +}
 diff --git a/hw/usb4/usb4-tunnel-bridge.c b/hw/usb4/usb4-tunnel-bridge.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..61898d91babc1cdc3e06f7262a3e3b1e4a29ba63
+index 0000000000000000000000000000000000000000..2972eca691d9b021d712ec3e1d2e22afb6f19895
 --- /dev/null
 +++ b/hw/usb4/usb4-tunnel-bridge.c
-@@ -0,0 +1,1114 @@
+@@ -0,0 +1,1107 @@
 +/*
 + * USB4 PCIe tunnel bridge: a gated pci-bridge subclass with SHPC, for
 + * the i440FX machine and legacy (PCI-only) guests.
@@ -21184,13 +21155,6 @@ index 0000000000000000000000000000000000000000..61898d91babc1cdc3e06f7262a3e3b1e
 +    DEFINE_PROP_UINT32("settle-ms", USB4TunnelBridge, slot.settle_ms, 2000),
 +    DEFINE_PROP_BOOL("orderly-admin-down", USB4TunnelBridge,
 +                     slot.orderly_admin_down, false),
-+    /*
-+     * ARCHITECTURE.md 4.4 "Link retrain": off on SHPC, which has no link
-+     * state to tell the guest the endpoint was reset (and the legacy
-+     * Windows kits rely on a CM teardown removing the endpoint).
-+     */
-+    DEFINE_PROP_BOOL("link-retrain", USB4TunnelBridge, slot.link_retrain,
-+                     false),
 +    DEFINE_PROP_BOOL("shpc-autoenable", USB4TunnelBridge, shpc_autoenable,
 +                     false),
 +    /* ARCHITECTURE.md 4.4a: none | restore | acpi */
@@ -21263,10 +21227,10 @@ index 0000000000000000000000000000000000000000..61898d91babc1cdc3e06f7262a3e3b1e
 +type_init(tb_register_types)
 diff --git a/hw/usb4/usb4-tunnel-dsp.c b/hw/usb4/usb4-tunnel-dsp.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d268b5ace3ddf1f37fe966176bdf5bd84147f584
+index 0000000000000000000000000000000000000000..376950ccccb45496ed390fd6af9dfd1d467ffed2
 --- /dev/null
 +++ b/hw/usb4/usb4-tunnel-dsp.c
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,262 @@
 +/*
 + * USB4 daisy chain: a gated hot-plug PCIe switch downstream port
 + *
@@ -21341,7 +21305,6 @@ index 0000000000000000000000000000000000000000..d268b5ace3ddf1f37fe966176bdf5bd8
 +    .after_insert = usb4_pcie_slot_after_insert,
 +    .apply_power = usb4_pcie_slot_apply_power,
 +    .power_done = usb4_pcie_slot_power_done,
-+    .link_change = usb4_pcie_slot_link_change,
 +};
 +
 +static USB4Device *dsp_device(USB4TunnelDsp *s)
@@ -21479,9 +21442,6 @@ index 0000000000000000000000000000000000000000..d268b5ace3ddf1f37fe966176bdf5bd8
 +    DEFINE_PROP_UINT32("settle-ms", USB4TunnelDsp, slot.settle_ms, 2000),
 +    DEFINE_PROP_BOOL("orderly-admin-down", USB4TunnelDsp,
 +                     slot.orderly_admin_down, false),
-+    /* ARCHITECTURE.md 4.4 "Link retrain": on for PCIe native hot-plug */
-+    DEFINE_PROP_BOOL("link-retrain", USB4TunnelDsp, slot.link_retrain,
-+                     true),
 +    DEFINE_PROP_UINT32("usb4-port", USB4TunnelDsp, usb4_port_number, 0),
 +    DEFINE_PROP_BOOL("acpi-hotplug-in-d3", USB4TunnelDsp, acpi_hotplug_d3,
 +                     true),
@@ -21535,10 +21495,10 @@ index 0000000000000000000000000000000000000000..d268b5ace3ddf1f37fe966176bdf5bd8
 +type_init(dsp_register_types)
 diff --git a/hw/usb4/usb4-tunnel-port.c b/hw/usb4/usb4-tunnel-port.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..cc4a181c0522b8c8951d422e38a718cf79cb88aa
+index 0000000000000000000000000000000000000000..e5ba898da3872aa407cd99134995f90c1f4cca81
 --- /dev/null
 +++ b/hw/usb4/usb4-tunnel-port.c
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,479 @@
 +/*
 + * USB4 PCIe tunnel port: a gated pcie-root-port subclass (q35).
 + *
@@ -21618,15 +21578,6 @@ index 0000000000000000000000000000000000000000..cc4a181c0522b8c8951d422e38a718cf
 +{
 +    pcie_cap_slot_unplug_request_cb(HOTPLUG_HANDLER(ts->bridge),
 +                                    DEVICE(ts->ep), errp);
-+}
-+
-+/*
-+ * Link retrain (ARCHITECTURE.md 4.4): the occupant stays, its link goes
-+ * down with the tunnel and comes back up with it.
-+ */
-+void usb4_pcie_slot_link_change(USB4TunnelSlot *ts, bool up)
-+{
-+    pcie_cap_slot_link_change(ts->bridge, up);
 +}
 +
 +/*
@@ -21806,7 +21757,6 @@ index 0000000000000000000000000000000000000000..cc4a181c0522b8c8951d422e38a718cf
 +    .machine_done = tp_machine_done,
 +    .apply_power = usb4_pcie_slot_apply_power,
 +    .power_done = usb4_pcie_slot_power_done,
-+    .link_change = usb4_pcie_slot_link_change,
 +};
 +
 +/* ------------------------------------------------------------------ */
@@ -21976,9 +21926,6 @@ index 0000000000000000000000000000000000000000..cc4a181c0522b8c8951d422e38a718cf
 +    DEFINE_PROP_UINT32("settle-ms", USB4TunnelPort, slot.settle_ms, 2000),
 +    DEFINE_PROP_BOOL("orderly-admin-down", USB4TunnelPort,
 +                     slot.orderly_admin_down, false),
-+    /* ARCHITECTURE.md 4.4 "Link retrain": on for PCIe native hot-plug */
-+    DEFINE_PROP_BOOL("link-retrain", USB4TunnelPort, slot.link_retrain,
-+                     true),
 +    DEFINE_PROP_UINT32("usb4-port", USB4TunnelPort, usb4_port_number, 0),
 +    DEFINE_PROP_BOOL("acpi-hotplug-in-d3", USB4TunnelPort,
 +                     acpi_hotplug_d3, true),
@@ -22033,10 +21980,10 @@ index 0000000000000000000000000000000000000000..cc4a181c0522b8c8951d422e38a718cf
 +type_init(tp_register_types)
 diff --git a/hw/usb4/usb4-tunnel-slot.c b/hw/usb4/usb4-tunnel-slot.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829f415ac98
+index 0000000000000000000000000000000000000000..5ef2a2dd2c443f166d7c19d13343e9e642def53c
 --- /dev/null
 +++ b/hw/usb4/usb4-tunnel-slot.c
-@@ -0,0 +1,2126 @@
+@@ -0,0 +1,1944 @@
 +/*
 + * USB4 PCIe tunnel: access gate and endpoint lifecycle shared by
 + * usb4-tunnel-port (q35) and usb4-tunnel-bridge (i440FX).
@@ -22549,16 +22496,7 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +
 +    trace_usb4_tp_quiesce(usb4_tunnel_slot_name(ts), gen);
 +    object_ref(OBJECT(ep));
-+    if (ts->retrain) {
-+        /*
-+         * The endpoint stays: the link loss resets the function as a hot
-+         * reset would, configuration space included (BARs, Command),
-+         * and the guest restores it after the retrain.
-+         */
-+        pci_device_reset(ep);
-+    } else {
-+        device_cold_reset(DEVICE(ep));
-+    }
++    device_cold_reset(DEVICE(ep));
 +    blk_drain_all();
 +    ok = ts_alive(ts) && ts->ep == ep && ts->ep_gen == gen &&
 +         ts->ep_state == EP_DOOMED;
@@ -23068,18 +23006,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 + * endpoint exists; if creating it fails all the same, the endpoint is
 + * taken away again, so the guest never keeps a partial layout.
 + */
-+/*
-+ * The live endpoint stands for the router of the tunnel's last up, in
-+ * its current attachment life, when that up came from the fabric; else
-+ * for none (a stimulus, never retrained). ARCHITECTURE.md 4.4.
-+ */
-+static void ts_ep_stand_for(USB4TunnelSlot *ts)
-+{
-+    g_free(ts->ep_dev_path);
-+    ts->ep_dev_path = ts->up_fabric ? g_strdup(ts->up_dev_path) : NULL;
-+    ts->ep_life = ts->up_fabric ? ts->up_life : 0;
-+}
-+
 +static TsInsertResult ts_insert(USB4TunnelSlot *ts, bool cold)
 +{
 +    const char *drive = ts_eff_drive(ts);
@@ -23148,8 +23074,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    ts->ep = PCI_DEVICE(dev);
 +    ts->ep_gen = gen;
 +    ts->ep_state = EP_LIVE;
-+    /* The router it stands for, for a later link retrain. */
-+    ts_ep_stand_for(ts);
 +    if (!ts_realize_dev(dev, BUS(ts_sec_bus(ts)), &err)) {
 +        ts->ep = NULL;
 +        ts->ep_state = EP_NONE;
@@ -23225,68 +23149,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    return TS_INSERT_FAILED;
 +}
 +
-+/* ------------------------------------------------------------------ */
-+/* Link retrain (ARCHITECTURE.md 4.4, "Link retrain")                   */
-+/* ------------------------------------------------------------------ */
-+
-+/* Slots holding an endpoint for a link retrain. */
-+static GSList *ts_retraining;
-+
-+/* The router life of the device router at QOM path @path (0: gone). */
-+static uint64_t ts_path_life(const char *path)
-+{
-+    Object *o = path ? object_resolve_path_type(path, TYPE_USB4_DEVICE,
-+                                                NULL) : NULL;
-+
-+    return o ? usb4_device_router_life((USB4Device *)o) : 0;
-+}
-+
-+/*
-+ * A down transition of the fabric tunnel to @dev keeps the endpoint for
-+ * a retrain: the property is on, the endpoint was inserted for @dev's
-+ * router and that router has not been unplugged since (same attachment
-+ * life; an unplug, a link loss or a host router reset change it).
-+ */
-+static bool ts_retrain_applies(USB4TunnelSlot *ts, USB4Device *dev)
-+{
-+    g_autofree char *path = NULL;
-+
-+    if (!ts->link_retrain || !ts->ep_life || !ts->ep_dev_path || !dev) {
-+        return false;
-+    }
-+    path = object_get_canonical_path(OBJECT(dev));
-+    return !strcmp(path, ts->ep_dev_path) &&
-+           usb4_device_router_life(dev) == ts->ep_life;
-+}
-+
-+static void ts_retrain_end(USB4TunnelSlot *ts)
-+{
-+    ts->retrain = false;
-+    ts->retrain_held = false;
-+    ts_retraining = g_slist_remove(ts_retraining, ts);
-+}
-+
-+/*
-+ * The held endpoint still stands for its router: the router was not
-+ * unplugged, and a tunnel that is up again goes to that router.
-+ */
-+static bool ts_retrain_valid(USB4TunnelSlot *ts)
-+{
-+    if (ts_path_life(ts->ep_dev_path) != ts->ep_life) {
-+        return false;
-+    }
-+    return !ts->tunnel_up ||
-+           (ts->up_fabric && ts->up_life == ts->ep_life &&
-+            !g_strcmp0(ts->up_dev_path, ts->ep_dev_path));
-+}
-+
-+void usb4_tunnel_retrain_recheck(void)
-+{
-+    for (GSList *l = ts_retraining; l; l = l->next) {
-+        ts_schedule(l->data);
-+    }
-+}
-+
 +/* Lifecycle work of one slot; runs with ts_running == ts. */
 +static void ts_bh_work(USB4TunnelSlot *ts)
 +{
@@ -23335,37 +23197,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +                ts_schedule(ts);
 +            }
 +            return;
-+        }
-+        if (ts->retrain && ts_retrain_valid(ts)) {
-+            if (ts->tunnel_up) {
-+                /* Back to the same router: the endpoint is live again. */
-+                ts_retrain_end(ts);
-+                ts->ep_state = EP_LIVE;
-+                trace_usb4_tp_retrain(name, ts->ep_gen, "retrained");
-+                ts_tunnel_gate(ts, false);
-+                if (ts->ops->link_change) {
-+                    ts->ops->link_change(ts, true);
-+                }
-+                ts_event(ts, ts->ep_gen, "retrained");
-+            } else if (!ts->retrain_held) {
-+                /* Reset (the link went down), held for the router. */
-+                ts->retrain_held = true;
-+                trace_usb4_tp_retrain(name, ts->ep_gen, "held");
-+                ts_event(ts, ts->ep_gen, "retrain-held");
-+            }
-+            return;
-+        }
-+        if (ts->retrain) {
-+            /*
-+             * The router was unplugged, or the tunnel came back to
-+             * another one: the endpoint goes, as for an unplug
-+             * (surprise) or a reconnection.
-+             */
-+            trace_usb4_tp_retrain(name, ts->ep_gen, "abandoned");
-+            ts_retrain_end(ts);
-+            if (!ts->tunnel_up) {
-+                ts->reason = USB4_TUNNEL_REASON_SURPRISE;
-+            }
 +        }
 +        if (ts->tunnel_up || ts->reason == USB4_TUNNEL_REASON_SURPRISE ||
 +            (ts->reason == USB4_TUNNEL_REASON_ADMIN_DOWN &&
@@ -23529,7 +23360,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    g_free(ts->up_dev_path);
 +    ts->up_ndfp = usb4_device_downstream_ports(dev);
 +    ts->up_dev_path = object_get_canonical_path(OBJECT(dev));
-+    ts->up_life = usb4_device_router_life(dev);
 +}
 +
 +/*
@@ -23553,13 +23383,8 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    return dev;
 +}
 +
-+/*
-+ * @fabric: the transition comes from the fabric's tunnel evaluation (a
-+ * CM), not from a test stimulus (the tunnel property, the harness).
-+ */
-+static void ts_set_state(USB4TunnelSlot *ts, USB4Device *dev,
-+                         USB4TunnelState st, USB4TunnelReason why,
-+                         bool fabric)
++void usb4_tunnel_slot_set_state(USB4TunnelSlot *ts, USB4Device *dev,
++                                USB4TunnelState st, USB4TunnelReason why)
 +{
 +    bool up = st == USB4_TUNNEL_UP;
 +    static const char *const reasons[] = {
@@ -23573,22 +23398,10 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +                            why < ARRAY_SIZE(reasons) && reasons[why] ?
 +                            reasons[why] : "?", ts->ep_state);
 +
-+    if (!fabric && ts->retrain) {
-+        /*
-+         * A stimulus is not a CM (review r2 #1): the retrain ends and
-+         * the transition takes the ordinary path, the endpoint being
-+         * removed (down) or replaced (up) as for any other occupant.
-+         */
-+        trace_usb4_tp_retrain(usb4_tunnel_slot_name(ts), ts->ep_gen,
-+                              "abandoned");
-+        ts_retrain_end(ts);
-+    }
-+
 +    if (up) {
 +        if (dev) {
 +            ts_take_device(ts, dev);
 +        }
-+        ts->up_fabric = fabric && dev;
 +        if (!ts->tunnel_up) {
 +            ts->dismissed = false;
 +        }
@@ -23604,32 +23417,9 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    ts_tunnel_gate(ts, true);
 +    if (ts->ep && ts->ep_state == EP_LIVE) {
 +        ts->ep_state = EP_DOOMED;
-+        /*
-+         * The tunnel went down with the router still attached (a CM
-+         * took it down, or the S3 wakeup reset the routers): a link
-+         * retrain. The link goes down (the endpoint is reset in stage 2,
-+         * as on DL_Down), presence stays, and the endpoint waits for the
-+         * tunnel to that router to come back.
-+         */
-+        if (fabric && ts_retrain_applies(ts, dev)) {
-+            ts->retrain = true;
-+            ts->retrain_held = false;
-+            ts_retraining = g_slist_prepend(ts_retraining, ts);
-+            trace_usb4_tp_retrain(usb4_tunnel_slot_name(ts), ts->ep_gen,
-+                                  "link down");
-+            if (ts->ops->link_change) {
-+                ts->ops->link_change(ts, false);
-+            }
-+        }
 +    }
 +    ts_event(ts, ts->ep ? ts->ep_gen : 0, "gated");
 +    ts_schedule(ts);
-+}
-+
-+void usb4_tunnel_slot_set_state(USB4TunnelSlot *ts, USB4Device *dev,
-+                                USB4TunnelState st, USB4TunnelReason why)
-+{
-+    ts_set_state(ts, dev, st, why, false);
 +}
 +
 +bool usb4_tunnel_slot_is_endpoint(USB4TunnelSlot *ts, DeviceState *dev)
@@ -23665,7 +23455,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    }
 +    ts->ep = NULL;
 +    ts->ep_state = EP_NONE;
-+    ts_retrain_end(ts);
 +    timer_del(ts->eject_timer);
 +    ts->eject_expired = false;
 +    ts->awaiting_ack = true;
@@ -23808,7 +23597,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    /* An endpoint below goes away with the bridge's secondary bus. */
 +    ts->ep = NULL;
 +    ts->ep_state = EP_NONE;
-+    ts_retrain_end(ts);
 +    usb4_harness_free(ts);
 +    /* Namespaces still present go away with the subsystem bus. */
 +    while (ts->ns_devs->len) {
@@ -23828,8 +23616,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    g_free(ts->up_nic_netdev);
 +    g_free(ts->up_usb_drive);
 +    g_free(ts->up_dev_path);
-+    g_free(ts->ep_dev_path);
-+    ts->ep_dev_path = NULL;
 +}
 +
 +void usb4_tunnel_slot_finalize(USB4TunnelSlot *ts)
@@ -23866,7 +23652,7 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +
 +    /* A target being torn down takes no more transitions (review 2 #1). */
 +    if (ts && ts_alive(ts)) {
-+        ts_set_state(ts, dev, st, why, true);
++        usb4_tunnel_slot_set_state(ts, dev, st, why);
 +    }
 +}
 +
@@ -23892,7 +23678,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +        ts->ep = occ;
 +        ts->ep_gen = ++ts->next_gen;
 +        ts->ep_state = EP_LIVE;
-+        ts->ep_life = 0;            /* a controller, never retrained */
 +    }
 +    if (ts->ops->domain_power) {
 +        ts->ops->domain_power(ts, powered);
@@ -23914,24 +23699,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 + * insertion before guest firmware runs (from the reset's hold phase),
 + * with the slot powered as at power-on.
 + */
-+void usb4_tunnel_port_reattach(USB4TunnelPort *p, USB4Device *dev)
-+{
-+    USB4TunnelSlot *ts = ts_from_object(OBJECT(p));
-+    g_autofree char *path = NULL;
-+
-+    if (!ts || !ts_alive(ts) || !dev || !ts->ep ||
-+        ts->ep_state != EP_LIVE || !ts->ep_life || !ts->ep_dev_path) {
-+        return;
-+    }
-+    path = object_get_canonical_path(OBJECT(dev));
-+    if (strcmp(path, ts->ep_dev_path)) {
-+        return;
-+    }
-+    ts_take_device(ts, dev);
-+    ts->up_fabric = true;
-+    ts_ep_stand_for(ts);
-+}
-+
 +void usb4_tunnel_port_cold_reconcile(USB4TunnelPort *p, USB4Device *dev)
 +{
 +    USB4TunnelSlot *ts = ts_from_object(OBJECT(p));
@@ -23996,7 +23763,6 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +    if (dev) {
 +        ts_take_device(ts, dev);
 +    }
-+    ts->up_fabric = dev != NULL;
 +    if (!ts->tunnel_up) {
 +        ts->dismissed = false;
 +    }
@@ -24072,14 +23838,13 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +        "none", "live", "doomed", "quiesced", "ejecting",
 +    };
 +
-+    return g_strdup_printf("%s gen=%" PRIu64 " gate=%s%s%s%s%s",
++    return g_strdup_printf("%s gen=%" PRIu64 " gate=%s%s%s%s",
 +                           names[ts->ep_state], ts->ep_gen,
 +                           ts->gate_closed ? "closed" : "open",
 +                           ts->gate_closed && !ts->dma_closed ?
 +                           " dma=open" : "",
 +                           ts->awaiting_ack ? " awaiting-ack" : "",
-+                           ts->dismissed ? " dismissed" : "",
-+                           ts->retrain ? " retrain" : "");
++                           ts->dismissed ? " dismissed" : "");
 +}
 +
 +static char *ts_prop_get_tunnel(Object *obj, Error **errp)
@@ -24165,10 +23930,10 @@ index 0000000000000000000000000000000000000000..bf07a9a659d13b1911944eac47257829
 +type_init(usb4_tunnel_target_register_types)
 diff --git a/hw/usb4/usb4-tunnel-slot.h b/hw/usb4/usb4-tunnel-slot.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4e82282f80b4ea57d641bb1366437aed82706442
+index 0000000000000000000000000000000000000000..b4ce3471087c575cfb48b8fbc046e8bce537252a
 --- /dev/null
 +++ b/hw/usb4/usb4-tunnel-slot.h
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,273 @@
 +/*
 + * USB4 PCIe tunnel: the access gate and endpoint lifecycle shared by the
 + * gated bridge types (usb4-tunnel-port on q35, usb4-tunnel-bridge on
@@ -24262,11 +24027,6 @@ index 0000000000000000000000000000000000000000..4e82282f80b4ea57d641bb1366437aed
 +     * usb4-tunnel-bridge: ARCHITECTURE.md 4.4a).
 +     */
 +    void (*domain_power)(USB4TunnelSlot *ts, bool powered);
-+    /*
-+     * Optional: report the link behind the occupied slot down or back up
-+     * for a link retrain (PCIe: Data Link Layer Link Active and DLLSC).
-+     */
-+    void (*link_change)(USB4TunnelSlot *ts, bool up);
 +} USB4TunnelSlotOps;
 +
 +struct USB4TunnelSlot {
@@ -24283,12 +24043,6 @@ index 0000000000000000000000000000000000000000..4e82282f80b4ea57d641bb1366437aed
 +    uint32_t eject_timeout_ms;
 +    uint32_t settle_ms;
 +    bool orderly_admin_down;
-+    /*
-+     * link-retrain: a CM taking the tunnel down and building it again to
-+     * the same router, never unplugged in between (the same attachment
-+     * life), keeps the endpoint (ARCHITECTURE.md 4.4, "Link retrain").
-+     */
-+    bool link_retrain;
 +
 +    /* access gate */
 +    MemoryRegion gate_root;
@@ -24324,8 +24078,6 @@ index 0000000000000000000000000000000000000000..4e82282f80b4ea57d641bb1366437aed
 +     */
 +    unsigned up_ndfp;
 +    char *up_dev_path;
-+    uint64_t up_life;           /* usb4_device_router_life() at the up */
-+    bool up_fabric;             /* the up came from the fabric, with a router */
 +    /* Tunnel bridges above this one (0 for a root port). */
 +    unsigned depth;
 +    unsigned power_retries;     /* hot insert not yet powered by guest */
@@ -24338,16 +24090,6 @@ index 0000000000000000000000000000000000000000..4e82282f80b4ea57d641bb1366437aed
 +    uint64_t ep_gen;
 +    uint64_t next_gen;
 +    bool dismissed;             /* guest/user removed it while up */
-+    /*
-+     * Link retrain: the router behind the endpoint (QOM path) and its
-+     * attachment life when the endpoint was inserted for it (0: not
-+     * inserted for a fabric tunnel), and whether the endpoint is held
-+     * across a down transition for that router's tunnel to come back.
-+     */
-+    char *ep_dev_path;
-+    uint64_t ep_life;
-+    bool retrain;
-+    bool retrain_held;          /* "retrain-held" reported */
 +    bool awaiting_ack;          /* slot went empty, guest has not acked */
 +    int64_t empty_since_ms;
 +    bool machine_ready;
@@ -24385,7 +24127,6 @@ index 0000000000000000000000000000000000000000..4e82282f80b4ea57d641bb1366437aed
 +void usb4_pcie_slot_after_insert(USB4TunnelSlot *ts, bool cold);
 +void usb4_pcie_slot_apply_power(USB4TunnelSlot *ts);
 +void usb4_pcie_slot_power_done(USB4TunnelSlot *ts);
-+void usb4_pcie_slot_link_change(USB4TunnelSlot *ts, bool up);
 +/* Defer the device side effects of Slot Control writes (after realize). */
 +void usb4_pcie_slot_defer_init(USB4TunnelSlot *ts);
 +/* After a guest config write; @old_*: Slot Control/Status before it. */
@@ -25179,10 +24920,10 @@ index c73844678886e4c45f0358ab0ece1b1ca28ddedc..0aa1cb0427f950546ff34943241bb74c
  
  static inline bool pci_bus_is_cxl(PCIBus *bus)
 diff --git a/include/hw/pci/pcie.h b/include/hw/pci/pcie.h
-index 71ba94874b4bd684fd6110d7baeedbbdc3bf26d6..06caace27f50c673ec701c1e0fe0391a0805ce3e 100644
+index 71ba94874b4bd684fd6110d7baeedbbdc3bf26d6..4b3aba7196a1a039891ba823d2808092389fedde 100644
 --- a/include/hw/pci/pcie.h
 +++ b/include/hw/pci/pcie.h
-@@ -114,6 +114,21 @@ void pcie_cap_slot_write_config(PCIDevice *dev,
+@@ -114,6 +114,19 @@ void pcie_cap_slot_write_config(PCIDevice *dev,
                                  uint32_t addr, uint32_t val, int len);
  int pcie_cap_slot_post_load(void *opaque, int version_id);
  void pcie_cap_slot_push_attention_button(PCIDevice *dev);
@@ -25192,8 +24933,6 @@ index 71ba94874b4bd684fd6110d7baeedbbdc3bf26d6..06caace27f50c673ec701c1e0fe0391a
 +/* Signal the Command Completed held back by PCIESlot.defer_slot_effects. */
 +void pcie_cap_slot_complete_deferred(PCIDevice *dev);
 +void pcie_cap_slot_enable_dllsc(PCIDevice *dev);
-+/* Link down or back up behind an occupied slot: DLLLA, and DLLSC if on. */
-+void pcie_cap_slot_link_change(PCIDevice *dev, bool up);
 +/*
 + * Report the slot's adapter present (power and link up) or absent, as
 + * when the device tree behind the port is powered up or down while the
@@ -25452,10 +25191,10 @@ index 34dd06f9f732dee7d3c6d0458da8bb67f23d76b4..8670ea906b3d1d79a8cd636dcb594259
       * Flush the record/replay queue. Now the VM state is going
       * to change. Therefore we don't need to preserve its consistency
 diff --git a/qapi/misc.json b/qapi/misc.json
-index c71a5fe65798854bc94e2b884cb8e5832fb5676d..0029e82884d868fd70a4af61006f567195f70444 100644
+index c71a5fe65798854bc94e2b884cb8e5832fb5676d..a0b42319bed515c5d19b89b19a41003779c3e7b8 100644
 --- a/qapi/misc.json
 +++ b/qapi/misc.json
-@@ -613,3 +613,92 @@
+@@ -613,3 +613,90 @@
  { 'event': 'VFU_CLIENT_HANGUP',
    'data': { 'vfu-id': 'str', 'vfu-qom-path': 'str',
              'dev-id': 'str', 'dev-qom-path': 'str' } }
@@ -25474,10 +25213,8 @@ index c71a5fe65798854bc94e2b884cb8e5832fb5676d..0029e82884d868fd70a4af61006f5671
 +#     quiesced; guest memory no longer changes on its behalf),
 +#     "eject-requested", "removed", "settle-timeout", "inserted",
 +#     "insert-failed" (gave up retrying the endpoint realize),
-+#     "gate-open", for a link retrain "retrain-held" (endpoint reset
-+#     and kept while its router's tunnel is down) and "retrained" (the
-+#     same endpoint reachable again), and for the test harness
-+#     "harness-gated", "harness-reads-fail" and "harness-reopened"
++#     "gate-open", and for the test harness "harness-gated",
++#     "harness-reads-fail" and "harness-reopened"
 +#
 +# Since: 11.2
 +#
@@ -25640,7 +25377,7 @@ index 4bbe18a86fbb8e10204829f373374a8a9194fafe..e9ac59fccecb862b8af6d9c7588eaad4
      qemu_log_mask(CPU_LOG_INT, "SMM: after RSM\n");
      log_cpu_state_mask(CPU_LOG_INT, CPU(cpu), CPU_DUMP_CCOP);
 diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
-index 78b30106496367362132cbdbfa6c535983241759..8fc84772f446992189fb98eb2c7fe365fd6b2c14 100644
+index 78b30106496367362132cbdbfa6c535983241759..ca3a018885a8f7ac49acbc5ccdad1bd7d663bcc1 100644
 --- a/tests/qtest/meson.build
 +++ b/tests/qtest/meson.build
 @@ -17,6 +17,7 @@ slow_qtests = {
@@ -25661,7 +25398,7 @@ index 78b30106496367362132cbdbfa6c535983241759..8fc84772f446992189fb98eb2c7fe365
    (config_all_devices.has_key('CONFIG_I440FX') ? ['ide-test'] : []) +                       \
    (config_all_devices.has_key('CONFIG_I440FX') ? ['numa-test'] : []) +                      \
    (config_all_devices.has_key('CONFIG_I440FX') ? ['test-x86-cpuid-compat'] : []) +          \
-@@ -74,9 +78,22 @@ qtests_i386 = \
+@@ -74,9 +78,21 @@ qtests_i386 = \
    (config_all_devices.has_key('CONFIG_WDT_IB700') ? ['wdt_ib700-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_PVPANIC_ISA') ? ['pvpanic-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_PVPANIC_PCI') ? ['pvpanic-pci-test'] : []) +          \
@@ -25680,7 +25417,6 @@ index 78b30106496367362132cbdbfa6c535983241759..8fc84772f446992189fb98eb2c7fe365
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-tb3dev-test'] : []) +                \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-root-hotplug-test'] : []) +          \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-usb3-test'] : []) +                  \
-+  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-retrain-test'] : []) +               \
    (config_all_devices.has_key('CONFIG_LPC_ICH9') ? ['lpc-ich9-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_MC146818RTC') ? ['rtc-test'] : []) +                  \
    (config_all_devices.has_key('CONFIG_USB_UHCI') ? ['usb-hcd-uhci-test'] : []) +            \
@@ -32057,10 +31793,10 @@ index 0000000000000000000000000000000000000000..3d77c572bbc2512f5f79d78e72f14cf0
 +}
 diff --git a/tests/qtest/usb4-icm-test.c b/tests/qtest/usb4-icm-test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..44a01a0e45ff736c93c1d2cb92ce44c3cc8f3000
+index 0000000000000000000000000000000000000000..11fae9e886d97bfffdeae499cd4daf8f26378002
 --- /dev/null
 +++ b/tests/qtest/usb4-icm-test.c
-@@ -0,0 +1,2296 @@
+@@ -0,0 +1,2493 @@
 +/*
 + * QTest for the tb3-alpine-ridge profile of usb4-host and its emulated
 + * firmware connection manager (ICM)
@@ -34322,6 +34058,201 @@ index 0000000000000000000000000000000000000000..44a01a0e45ff736c93c1d2cb92ce44c3
 +    qtest_quit(qts);
 +}
 +
++/*
++ * R7, R24 (ICM-PROTOCOL.md 1, 10.2): the captured MSI-X layout, all 16
++ * vectors usable through the vector allocation registers (Windows
++ * allocated all 16 on the real controller), and the auto-clear bit on
++ * each of them.
++ */
++static void msix_entry(T *t, unsigned v, uint64_t addr, uint32_t data,
++                       bool masked)
++{
++    uint64_t e = t->dev->msix_table_off + 16 * v;
++
++    qpci_io_writel(t->dev, t->dev->msix_table_bar, e + 0, (uint32_t)addr);
++    qpci_io_writel(t->dev, t->dev->msix_table_bar, e + 4, addr >> 32);
++    qpci_io_writel(t->dev, t->dev->msix_table_bar, e + 8, data);
++    qpci_io_writel(t->dev, t->dev->msix_table_bar, e + 12, masked);
++}
++
++static void test_msix_vectors(void)
++{
++    uint32_t w[64], dr = 0x00000003, bar1;
++    uint64_t msg;
++    T *t = t_start(NULL, false);
++
++    /* MSI-X at 0xa0, 16 entries, table at BAR1 + 0, PBA at BAR1 + 0xfa0 */
++    g_assert_cmpuint(qpci_find_capability(t->dev, PCI_CAP_ID_MSIX, 0), ==,
++                     0xa0);
++    g_assert_cmphex(qpci_config_readw(t->dev, 0xa0 + PCI_MSIX_FLAGS) &
++                    PCI_MSIX_FLAGS_QSIZE, ==, 15);
++    g_assert_cmphex(qpci_config_readl(t->dev, 0xa0 + PCI_MSIX_TABLE), ==,
++                    0x00000001);
++    g_assert_cmphex(qpci_config_readl(t->dev, 0xa0 + PCI_MSIX_PBA), ==,
++                    0x00000fa1);
++    /* BAR1: 4 KiB, 32-bit memory (10.2) */
++    bar1 = qpci_config_readl(t->dev, PCI_BASE_ADDRESS_1);
++    qpci_config_writel(t->dev, PCI_BASE_ADDRESS_1, 0xffffffff);
++    g_assert_cmphex(qpci_config_readl(t->dev, PCI_BASE_ADDRESS_1), ==,
++                    0xfffff000);
++    qpci_config_writel(t->dev, PCI_BASE_ADDRESS_1, bar1);
++
++    qpci_msix_enable(t->dev);
++    g_assert_cmpuint(qpci_msix_table_size(t->dev), ==, 16);
++    msg = guest_alloc(&t->alloc, 16 * 4);
++    for (unsigned v = 0; v < 16; v++) {
++        qtest_writel(t->qts, msg + 4 * v, 0);
++        msix_entry(t, v, msg + 4 * v, 0x100 + v, false);
++    }
++    rings_setup(t);
++    wr(t, IMR0, 1u << 12);                  /* RX ring 0 only */
++    wr(t, DMA_MISC, 0x01000016);            /* auto-clear (R7) */
++
++    /* RX ring 0 (cause 12) on each vector in turn (0x38c44 bits 19:16) */
++    for (unsigned v = 0; v < 16; v++) {
++        wr(t, 0x38c44, v << 16);
++        icm_cmd(t, &dr, 1);
++        for (unsigned u = 0; u < 16; u++) {
++            g_assert_cmphex(qtest_readl(t->qts, msg + 4 * u), ==,
++                            u <= v ? 0x100 + u : 0);
++        }
++        g_assert_cmphex(rd(t, ISR0) & (1u << 12), ==, 0);
++        g_assert_cmpuint(icm_expect(t, PDF_ICM_RESP, w), ==, 2);
++    }
++
++    /*
++     * Two causes on two vectors at once: TX ring 0 (cause 0, 0x38c40
++     * bits 3:0) on 15, RX ring 0 on 3; each delivery clears only its own
++     * status bit, so with 15 masked the TX bit stays pending.
++     */
++    for (unsigned v = 0; v < 16; v++) {
++        qtest_writel(t->qts, msg + 4 * v, 0);
++    }
++    wr(t, IMR0, (1u << 0) | (1u << 12));
++    wr(t, 0x38c40, 15);
++    wr(t, 0x38c44, 3 << 16);
++    msix_entry(t, 15, msg + 4 * 15, 0x10f, true);
++    icm_cmd(t, &dr, 1);
++    g_assert_cmphex(qtest_readl(t->qts, msg + 4 * 3), ==, 0x103);
++    g_assert_cmphex(qtest_readl(t->qts, msg + 4 * 15), ==, 0);
++    g_assert_cmphex(qtest_readl(t->qts, msg), ==, 0);
++    /* unmasking delivers the pending TX message and clears its bit */
++    msix_entry(t, 15, msg + 4 * 15, 0x10f, false);
++    g_assert_cmphex(qtest_readl(t->qts, msg + 4 * 15), ==, 0x10f);
++    g_assert_cmphex(rd(t, ISR0) & ((1u << 0) | (1u << 12)), ==, 0);
++    g_assert_cmpuint(icm_expect(t, PDF_ICM_RESP, w), ==, 2);
++    t_stop(t);
++}
++
++/*
++ * R29 (ICM-PROTOCOL.md 1, 10.1): on q35 the NHI and the controller's
++ * switch ports carry a Device Serial Number capability with one value.
++ * Extended config space through MMCONFIG (q35 PCIEXBAR), with bus numbers
++ * assigned here since no firmware runs.
++ */
++#define MMCFG                0xb0000000ULL
++
++static uint64_t ecam(int bus, int devfn, int off)
++{
++    return MMCFG + ((uint64_t)bus << 20) + (devfn << 12) + off;
++}
++
++static void ecam_buses(QTestState *qts, int bus, int devfn, int sec, int sub)
++{
++    qtest_writel(qts, ecam(bus, devfn, PCI_PRIMARY_BUS),
++                 bus | (sec << 8) | (sub << 16));
++}
++
++/* The DSN of a function (0: none), walking its extended capabilities */
++static uint64_t ecam_dsn(QTestState *qts, int bus, int devfn)
++{
++    unsigned off = 0x100;
++
++    for (int n = 0; off && n < 32; n++) {
++        uint32_t h = qtest_readl(qts, ecam(bus, devfn, off));
++
++        if (h == 0 || h == 0xffffffff) {
++            return 0;
++        }
++        if ((h & 0xffff) == PCI_EXT_CAP_ID_DSN) {
++            g_assert_cmpuint((h >> 16) & 0xf, ==, 1);
++            return qtest_readl(qts, ecam(bus, devfn, off + 4)) |
++                   (uint64_t)qtest_readl(qts, ecam(bus, devfn, off + 8)) << 32;
++        }
++        off = h >> 20;
++    }
++    return 0;
++}
++
++static QTestState *dsn_start(const char *host_opts, const char *port_opts)
++{
++    QTestState *qts = qtest_initf(
++        "-machine q35 "
++        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
++        "-device usb4-tunnel-port,id=tbrp,bus=pcie.0,addr=0x1c,chassis=1,"
++        "slot=1,usb4-dvsec=off "
++        "-device usb4-tb3-usp,id=tbusp,bus=tbrp%s "
++        "-device usb4-tb3-dsp,id=tbd0,bus=tbusp,addr=0.0,chassis=2,slot=0%s "
++        "-device usb4-tb3-tunnel-dsp,id=tp0,bus=tbusp,addr=1.0,chassis=3,"
++        "slot=1%s "
++        "-device usb4-host,id=u4,bus=tbd0,addr=0.0,tunnel-port=tp0,"
++        "profile=tb3-alpine-ridge%s",
++        port_opts, port_opts, port_opts, host_opts);
++    QPCIBus *bus;
++    QPCIDevice *mch;
++    QGuestAllocator alloc;
++
++    pc_alloc_init(&alloc, qts, ALLOC_NO_FLAGS);
++    bus = qpci_new_pc(qts, &alloc);
++    mch = qpci_device_find(bus, 0);
++    qpci_config_writel(mch, 0x64, 0);
++    qpci_config_writel(mch, 0x60, (uint32_t)MMCFG | 1);
++    g_free(mch);
++    qpci_free_pc(bus);
++    alloc_destroy(&alloc);
++    /* root port 0:1c.0 -> bus 1 (usp) -> bus 2 (dsps) -> bus 3 (NHI) */
++    ecam_buses(qts, 0, QPCI_DEVFN(0x1c, 0), 1, 3);
++    ecam_buses(qts, 1, 0, 2, 3);
++    ecam_buses(qts, 2, QPCI_DEVFN(0, 0), 3, 3);
++    g_assert_cmphex(qtest_readl(qts, ecam(1, 0, 0)), ==, 0x15c08086);
++    g_assert_cmphex(qtest_readl(qts, ecam(2, QPCI_DEVFN(1, 0), 0)), ==,
++                    0x15c08086);
++    g_assert_cmphex(qtest_readl(qts, ecam(3, 0, 0)), ==, 0x15bf8086);
++    return qts;
++}
++
++static void test_dsn(void)
++{
++    const uint64_t dsn = 0x1122334455667788ULL;
++    QTestState *qts;
++
++    /* one value on the NHI and all switch ports (10.1) */
++    qts = dsn_start(",dsn-value=0x1122334455667788",
++                    ",dsn-value=0x1122334455667788");
++    g_assert_cmphex(ecam_dsn(qts, 3, 0), ==, dsn);
++    /* the NHI's first extended capability, as captured (1) */
++    g_assert_cmphex(qtest_readl(qts, ecam(3, 0, 0x100)) & 0xffff, ==,
++                    PCI_EXT_CAP_ID_DSN);
++    g_assert_cmphex(ecam_dsn(qts, 1, 0), ==, dsn);
++    g_assert_cmphex(ecam_dsn(qts, 2, QPCI_DEVFN(0, 0)), ==, dsn);
++    g_assert_cmphex(ecam_dsn(qts, 2, QPCI_DEVFN(1, 0)), ==, dsn);
++    /* the root port above stands for the PCH's: no DSN (lspci 00:1c.4) */
++    g_assert_cmphex(ecam_dsn(qts, 0, QPCI_DEVFN(0x1c, 0)), ==, 0);
++    qtest_quit(qts);
++
++    /* NHI default: derived from the uuid; ports without dsn-value: none */
++    qts = dsn_start(",uuid=00112233-4455-6677-8899-aabbccddeeff", "");
++    g_assert_cmphex(ecam_dsn(qts, 3, 0), ==, 0x0011223344556677ULL);
++    g_assert_cmphex(ecam_dsn(qts, 1, 0), ==, 0);
++    g_assert_cmphex(ecam_dsn(qts, 2, QPCI_DEVFN(1, 0)), ==, 0);
++    qtest_quit(qts);
++
++    /* dsn=off: no extended capability on the NHI at all */
++    qts = dsn_start(",dsn=off", "");
++    g_assert_cmphex(qtest_readl(qts, ecam(3, 0, 0x100)), ==, 0);
++    qtest_quit(qts);
++}
++
 +int main(int argc, char **argv)
 +{
 +    g_test_init(&argc, &argv, NULL);
@@ -34330,6 +34261,8 @@ index 0000000000000000000000000000000000000000..44a01a0e45ff736c93c1d2cb92ce44c3
 +    qtest_add_func("/usb4-icm/driver-ready", test_driver_ready);
 +    qtest_add_func("/usb4-icm/boot-acl", test_boot_acl);
 +    qtest_add_func("/usb4-icm/msix-autoclear", test_msix_autoclear);
++    qtest_add_func("/usb4-icm/msix-vectors", test_msix_vectors);
++    qtest_add_func("/usb4-icm/dsn", test_dsn);
 +    qtest_add_func("/usb4-icm/device-user", test_device_user);
 +    qtest_add_func("/usb4-icm/device-none", test_device_none);
 +    qtest_add_func("/usb4-icm/usb4-device", test_usb4_device);
@@ -35553,1191 +35486,6 @@ index 0000000000000000000000000000000000000000..3321766da7ffbddd5d5b8a802ff7bd3b
 +    qtest_add_func("/usb4-icm-tr/assist-silence", test_assist_silence);
 +    qtest_add_func("/usb4-icm-tr/assist-silence-two-ports",
 +                   test_assist_silence_two_ports);
-+    return g_test_run();
-+}
-diff --git a/tests/qtest/usb4-retrain-test.c b/tests/qtest/usb4-retrain-test.c
-new file mode 100644
-index 0000000000000000000000000000000000000000..5ce863c326446e6d21c409c5aa1ddf3a328a5439
---- /dev/null
-+++ b/tests/qtest/usb4-retrain-test.c
-@@ -0,0 +1,1179 @@
-+/*
-+ * qtest for the link retrain of a PCIe tunnel (usb4-emu
-+ * docs/ARCHITECTURE.md section 4.4, "Link retrain"): a connection
-+ * manager that takes the PCIe tunnel down and builds it again to the
-+ * same device router, never unplugged in between (the same attachment
-+ * life, kept across the machine's S3 wakeup reset), keeps the endpoint
-+ * (as Linux does on S3 resume, where tb_tunnel_restart() deactivates and
-+ * reactivates the paths). With link-retrain=off, and for a real unplug,
-+ * a link loss or a host router reset (a new attachment life), the
-+ * endpoint is removed as for a hot unplug.
-+ *
-+ * Copyright (c) 2026 usb4-emu contributors
-+ * SPDX-License-Identifier: GPL-2.0-only
-+ *
-+ * Written from scratch for the usb4-emu project. The ring 0 and software
-+ * CM helpers are those of usb4-usb3-test.c; the tunnel is the PCIe one
-+ * of Connection Manager Guide 2.0 sections 5.3.1 and 5.3.2 (HopID 8
-+ * paths both ways, Path Enable on the Down adapter, then the Up adapter;
-+ * teardown in the same order), on q35 behind usb4-tunnel-port.
-+ */
-+
-+#include "qemu/osdep.h"
-+#include "qemu/bswap.h"
-+#include "libqtest.h"
-+#include "libqos/malloc-pc.h"
-+#include "qobject/qdict.h"
-+
-+#define MS              (1000 * 1000LL)
-+
-+/* NHI (host interface) BAR0 and ring registers, Spec Table 12-10 */
-+#define NHI_BAR         0xd0000000u
-+#define NHI_DEVFN       (4 << 3)
-+#define TX_RING(n)      (0x00000 + (n) * 0x10)
-+#define RX_RING(n)      (0x08000 + (n) * 0x10)
-+#define  RING_BASE_LO   0x0
-+#define  RING_BASE_HI   0x4
-+#define  RING_INDEX     0x8
-+#define  RING_SIZE      0xc
-+#define TX_CTRL(n)      (0x19800 + (n) * 0x20)
-+#define RX_CTRL(n)      (0x29800 + (n) * 0x20)
-+#define RX_PDF(n)       (0x29804 + (n) * 0x20)
-+#define RING_VALID      (1u << 31)
-+#define RING_RAW        (1u << 30)
-+#define DESC_DD         (1u << 21)
-+#define DESC_RS         (1u << 22)
-+#define DESC_IE         (1u << 23)
-+#define RING_N          16
-+#define BUF_SIZE        256
-+
-+/* Control packets (Spec Table 6-3), config spaces (6.4.2.2) */
-+#define PDF_READ        1
-+#define PDF_WRITE       2
-+#define PDF_NOTIFY      3
-+#define PDF_HOTPLUG     5
-+#define CS_PATH         0
-+#define CS_ADAPTER      1
-+#define CS_ROUTER       2
-+#define CAP_PROTO       4
-+
-+/*
-+ * Adapters (hw/usb4/usb4-router.c layouts): minimal host with two USB4
-+ * ports, PCIe Down for port 1 = 6; plain device router, lane 0 = 1,
-+ * PCIe Up = 3 (Linux: "PCIe Down path from 0:6 to 1:3").
-+ */
-+#define H_LANE          1
-+#define H_PCIE          6
-+#define D_LANE          1
-+#define D_PCIE          3
-+#define PCIE_PE         (1u << 31)      /* ADP_PCIE_CS_0, Table 8-19 */
-+/* ROUTER_CS_5 / _6 (Spec Table 8-11 / 8-12) */
-+#define RT_PTO          (1u << 24)
-+#define RT_CV           (1u << 31)
-+#define RT_CR           (1u << 25)
-+#define HOP             8               /* the PCIe paths use HopID 8 */
-+
-+/* tp0 and the NVMe behind it */
-+#define TP_DEVFN        (3 << 3)
-+#define WIN_MEM         0xe8000000u
-+#define WIN_MEM_REG     0xe800e800u
-+#define NVME_VS         0x08
-+#define NVME_CSTS       0x1c
-+/* PCI Express capability registers (PCIe Base Spec 4.0 7.5.3) */
-+#define EXP_LNKSTA      0x12
-+#define EXP_SLTCTL      0x18
-+#define EXP_SLTSTA      0x1a
-+#define LNKSTA_DLLLA    (1u << 13)
-+#define SLTSTA_PDC      (1u << 3)
-+#define SLTSTA_PDS      (1u << 6)
-+#define SLTSTA_DLLSC    (1u << 8)
-+
-+#define ENC0            "/machine/peripheral/enc0"
-+#define U4              "/machine/peripheral/u4"
-+#define TP0             "/machine/peripheral/tp0"
-+
-+typedef struct T {
-+    QTestState *qts;
-+    QGuestAllocator alloc;
-+    uint64_t tx_ring, rx_ring, tx_buf, rx_buf;
-+    unsigned tx_pi, rx_ci, rx_next;
-+    int exp;                        /* tp0's PCI Express capability */
-+    char *img;
-+} T;
-+
-+/* ------------------------------------------------------------------ */
-+/* Helpers                                                              */
-+/* ------------------------------------------------------------------ */
-+
-+static uint32_t cfg_addr(int bus, int devfn, int off)
-+{
-+    return 0x80000000u | (bus << 16) | (devfn << 8) | (off & 0xfc);
-+}
-+
-+static uint32_t cfg_readl(T *t, int bus, int devfn, int off)
-+{
-+    qtest_outl(t->qts, 0xcf8, cfg_addr(bus, devfn, off));
-+    return qtest_inl(t->qts, 0xcfc);
-+}
-+
-+static uint16_t cfg_readw(T *t, int bus, int devfn, int off)
-+{
-+    qtest_outl(t->qts, 0xcf8, cfg_addr(bus, devfn, off));
-+    return qtest_inw(t->qts, 0xcfc + (off & 2));
-+}
-+
-+static void cfg_writel(T *t, int bus, int devfn, int off, uint32_t val)
-+{
-+    qtest_outl(t->qts, 0xcf8, cfg_addr(bus, devfn, off));
-+    qtest_outl(t->qts, 0xcfc, val);
-+}
-+
-+static void cfg_writew(T *t, int bus, int devfn, int off, uint16_t val)
-+{
-+    qtest_outl(t->qts, 0xcf8, cfg_addr(bus, devfn, off));
-+    qtest_outw(t->qts, 0xcfc + (off & 2), val);
-+}
-+
-+static void step(T *t, int64_t ms)
-+{
-+    qtest_clock_step(t->qts, ms * MS);
-+}
-+
-+static char *qom_get_str(T *t, const char *path, const char *prop)
-+{
-+    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-get', 'arguments': "
-+                           "{'path': %s, 'property': %s}}", path, prop);
-+    char *s = g_strdup(qdict_get_str(rsp, "return"));
-+
-+    qobject_unref(rsp);
-+    return s;
-+}
-+
-+static bool qom_get_bool(T *t, const char *path, const char *prop)
-+{
-+    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-get', 'arguments': "
-+                           "{'path': %s, 'property': %s}}", path, prop);
-+    bool b = qdict_get_bool(rsp, "return");
-+
-+    qobject_unref(rsp);
-+    return b;
-+}
-+
-+static void qom_set_str(T *t, const char *path, const char *prop,
-+                        const char *val)
-+{
-+    qtest_qmp_assert_success(t->qts, "{'execute': 'qom-set', 'arguments': "
-+                             "{'path': %s, 'property': %s, 'value': %s}}",
-+                             path, prop, val);
-+}
-+
-+static void qom_set_bool(T *t, const char *path, const char *prop, bool val)
-+{
-+    qtest_qmp_assert_success(t->qts, "{'execute': 'qom-set', 'arguments': "
-+                             "{'path': %s, 'property': %s, 'value': %i}}",
-+                             path, prop, val);
-+}
-+
-+static bool peripheral_exists(T *t, const char *id)
-+{
-+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
-+    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-list', 'arguments': "
-+                           "{'path': %s}}", path);
-+    bool ok = qdict_haskey(rsp, "return");
-+
-+    qobject_unref(rsp);
-+    return ok;
-+}
-+
-+/* tp0's endpoint state starts with @want (logged otherwise) */
-+static bool ep_is(T *t, const char *want)
-+{
-+    g_autofree char *s = qom_get_str(t, TP0, "endpoint");
-+
-+    if (strncmp(s, want, strlen(want))) {
-+        g_test_message("endpoint: %s (wanted %s)", s, want);
-+        return false;
-+    }
-+    return true;
-+}
-+
-+/*
-+ * tp0's endpoint generation if it is live with the gate open, else 0. A
-+ * fresh endpoint's generation is above the last one's; an insert retried
-+ * while the old one still holds the drive takes one more.
-+ */
-+static unsigned live_gen(T *t)
-+{
-+    g_autofree char *s = qom_get_str(t, TP0, "endpoint");
-+    unsigned gen = 0;
-+
-+    if (sscanf(s, "live gen=%u", &gen) != 1 || !strstr(s, "gate=open")) {
-+        g_test_message("endpoint: %s (wanted live, gate open)", s);
-+        return 0;
-+    }
-+    return gen;
-+}
-+
-+/*
-+ * The next USB4_TUNNEL_ENDPOINT stage of tp0; every stage passed over on
-+ * the way to @stage is appended to @seen (space separated).
-+ */
-+static void wait_stage(T *t, const char *stage, GString *seen)
-+{
-+    for (;;) {
-+        QDict *ev = qtest_qmp_eventwait_ref(t->qts, "USB4_TUNNEL_ENDPOINT");
-+        QDict *data = qdict_get_qdict(ev, "data");
-+        g_autofree char *got = g_strdup(qdict_get_str(data, "stage"));
-+
-+        qobject_unref(ev);
-+        if (seen) {
-+            g_string_append_printf(seen, "%s ", got);
-+        }
-+        if (!strcmp(got, stage)) {
-+            return;
-+        }
-+    }
-+}
-+
-+static uint16_t slot_sta(T *t)
-+{
-+    return cfg_readw(t, 0, TP_DEVFN, t->exp + EXP_SLTSTA);
-+}
-+
-+static uint16_t link_sta(T *t)
-+{
-+    return cfg_readw(t, 0, TP_DEVFN, t->exp + EXP_LNKSTA);
-+}
-+
-+/* Acknowledge (clear) tp0's Slot Status events */
-+static void slot_ack(T *t, uint16_t bits)
-+{
-+    cfg_writew(t, 0, TP_DEVFN, t->exp + EXP_SLTSTA, bits);
-+}
-+
-+static char *make_img(void)
-+{
-+    char *name;
-+    int fd = g_file_open_tmp("usb4-retrain-XXXXXX", &name, NULL);
-+    g_autofree uint8_t *img = g_malloc0(1024 * 1024);
-+    FILE *f;
-+
-+    g_assert(fd >= 0);
-+    close(fd);
-+    f = fopen(name, "wb");
-+    g_assert(f);
-+    g_assert_cmpuint(fwrite(img, 1, 1024 * 1024, f), ==, 1024 * 1024);
-+    fclose(f);
-+    return name;
-+}
-+
-+/* tp0: bus 1, a memory window, slot powered (as HARNESS.md) */
-+static void tp_setup(T *t)
-+{
-+    cfg_writel(t, 0, TP_DEVFN, 0x18, 0x00010100);
-+    cfg_writel(t, 0, TP_DEVFN, 0x20, WIN_MEM_REG);
-+    cfg_writel(t, 0, TP_DEVFN, 0x04, 0x0006);
-+    cfg_writew(t, 0, TP_DEVFN, t->exp + EXP_SLTCTL, 0x0100);
-+}
-+
-+/*
-+ * q35: tunnel port tp0 at 00:03.0 (secondary bus 1, settle-ms 200, with
-+ * @tp_opts), usb4-host u4 at 00:04.0 (with @host_opts), device router
-+ * enc0 on port 1 with the NVMe drive.
-+ */
-+static T *t_new(char *img, const char *args)
-+{
-+    T *t = g_new0(T, 1);
-+    int exp;
-+
-+    t->img = img;
-+    t->qts = qtest_init(args);
-+    pc_alloc_init(&t->alloc, t->qts, ALLOC_NO_FLAGS);
-+    exp = cfg_readl(t, 0, TP_DEVFN, 0x34) & 0xfc;
-+    while (exp && (cfg_readl(t, 0, TP_DEVFN, exp) & 0xff) != 0x10) {
-+        exp = (cfg_readl(t, 0, TP_DEVFN, exp) >> 8) & 0xfc;
-+    }
-+    g_assert_cmpint(exp, !=, 0);
-+    t->exp = exp;
-+    tp_setup(t);
-+    return t;
-+}
-+
-+static T *t_start_host(const char *tp_opts, const char *host_opts)
-+{
-+    char *img = make_img();
-+    g_autofree char *args = g_strdup_printf(
-+        "-machine q35 -nodefaults "
-+        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
-+        "-drive if=none,id=nvme0,file=%s,format=raw "
-+        "-device usb4-tunnel-port,id=tp0,bus=pcie.0,addr=0x3,chassis=1,"
-+        "settle-ms=200%s "
-+        "-device usb4-host,id=u4,bus=pcie.0,addr=0x4,tunnel-port=tp0,"
-+        "msi=off,msix=off%s "
-+        "-device usb4-device,id=enc0,bus=u4.0,port=1,drive=nvme0,"
-+        "serial=QTRETRAIN",
-+        img, tp_opts ? tp_opts : "", host_opts ? host_opts : "");
-+
-+    return t_new(img, args);
-+}
-+
-+static T *t_start(const char *tp_opts)
-+{
-+    return t_start_host(tp_opts, NULL);
-+}
-+
-+static void t_stop(T *t)
-+{
-+    alloc_destroy(&t->alloc);
-+    qtest_quit(t->qts);
-+    if (t->img) {
-+        unlink(t->img);
-+    }
-+    g_free(t->img);
-+    g_free(t);
-+}
-+
-+/* ------------------------------------------------------------------ */
-+/* Ring 0 (raw mode), as tests/qtest/usb4-usb3-test.c                  */
-+/* ------------------------------------------------------------------ */
-+
-+static void nhi_wr(T *t, uint32_t off, uint32_t v)
-+{
-+    qtest_writel(t->qts, NHI_BAR + off, v);
-+}
-+
-+static uint32_t nhi_rd(T *t, uint32_t off)
-+{
-+    return qtest_readl(t->qts, NHI_BAR + off);
-+}
-+
-+static void desc_write(T *t, uint64_t ring, unsigned i, uint64_t addr,
-+                       uint32_t dw2)
-+{
-+    uint64_t d = ring + i * 16;
-+
-+    qtest_writel(t->qts, d, (uint32_t)addr);
-+    qtest_writel(t->qts, d + 4, addr >> 32);
-+    qtest_writel(t->qts, d + 8, dw2);
-+    qtest_writel(t->qts, d + 12, 0);
-+}
-+
-+static void rx_post(T *t, unsigned n)
-+{
-+    while (n--) {
-+        desc_write(t, t->rx_ring, t->rx_ci, t->rx_buf + t->rx_ci * BUF_SIZE,
-+                   DESC_RS | DESC_IE);
-+        t->rx_ci = (t->rx_ci + 1) % RING_N;
-+    }
-+    nhi_wr(t, RX_RING(0) + RING_INDEX, t->rx_ci);
-+}
-+
-+static void rings_setup(T *t)
-+{
-+    cfg_writel(t, 0, NHI_DEVFN, 0x10, NHI_BAR);
-+    cfg_writel(t, 0, NHI_DEVFN, 0x14, 0);
-+    cfg_writel(t, 0, NHI_DEVFN, 0x04, 0x6);
-+    if (!t->tx_ring) {
-+        t->tx_ring = guest_alloc(&t->alloc, RING_N * 16);
-+        t->rx_ring = guest_alloc(&t->alloc, RING_N * 16);
-+        t->tx_buf = guest_alloc(&t->alloc, RING_N * BUF_SIZE);
-+        t->rx_buf = guest_alloc(&t->alloc, RING_N * BUF_SIZE);
-+    }
-+    t->tx_pi = t->rx_ci = t->rx_next = 0;
-+    nhi_wr(t, TX_RING(0) + RING_BASE_LO, (uint32_t)t->tx_ring);
-+    nhi_wr(t, TX_RING(0) + RING_BASE_HI, t->tx_ring >> 32);
-+    nhi_wr(t, TX_RING(0) + RING_SIZE, RING_N);
-+    nhi_wr(t, TX_CTRL(0), RING_VALID | RING_RAW);
-+    nhi_wr(t, RX_RING(0) + RING_BASE_LO, (uint32_t)t->rx_ring);
-+    nhi_wr(t, RX_RING(0) + RING_BASE_HI, t->rx_ring >> 32);
-+    nhi_wr(t, RX_RING(0) + RING_SIZE, RING_N | (BUF_SIZE << 16));
-+    nhi_wr(t, RX_PDF(0), 0xffffffff);
-+    nhi_wr(t, RX_CTRL(0), RING_VALID | RING_RAW);
-+    rx_post(t, RING_N - 1);
-+}
-+
-+static uint32_t crc32c(const uint8_t *p, size_t n)
-+{
-+    uint32_t c = 0xffffffff;
-+
-+    while (n--) {
-+        c ^= *p++;
-+        for (int b = 0; b < 8; b++) {
-+            c = (c >> 1) ^ ((c & 1) ? 0x82f63b78 : 0);
-+        }
-+    }
-+    return ~c;
-+}
-+
-+static void tx_frame(T *t, unsigned pdf, const uint32_t *w, unsigned n)
-+{
-+    uint8_t buf[BUF_SIZE];
-+    uint64_t b = t->tx_buf + t->tx_pi * BUF_SIZE;
-+
-+    for (unsigned i = 0; i < n; i++) {
-+        stl_be_p(buf + 4 * i, w[i]);
-+    }
-+    stl_be_p(buf + 4 * n, crc32c(buf, 4 * n));
-+    qtest_memwrite(t->qts, b, buf, 4 * n + 4);
-+    desc_write(t, t->tx_ring, t->tx_pi, b,
-+               (4 * n + 4) | (pdf << 12) | DESC_RS | DESC_IE);
-+    t->tx_pi = (t->tx_pi + 1) % RING_N;
-+    nhi_wr(t, TX_RING(0) + RING_INDEX, t->tx_pi << 16);
-+}
-+
-+/* The next received frame: its PDF and words; 0 if none arrived. */
-+static unsigned rx_recv(T *t, uint32_t *w, unsigned *n)
-+{
-+    unsigned i = t->rx_next, len, pdf;
-+    uint32_t dw2;
-+    uint8_t buf[BUF_SIZE];
-+
-+    if (((nhi_rd(t, RX_RING(0) + RING_INDEX) >> 16) & 0xffff) == i) {
-+        return 0;
-+    }
-+    dw2 = qtest_readl(t->qts, t->rx_ring + i * 16 + 8);
-+    g_assert_cmphex(dw2 & DESC_DD, ==, DESC_DD);
-+    len = dw2 & 0xfff;
-+    pdf = (dw2 >> 12) & 0xf;
-+    g_assert_cmpuint(len, >=, 8);
-+    qtest_memread(t->qts, t->rx_buf + i * BUF_SIZE, buf, len);
-+    g_assert_cmphex(crc32c(buf, len - 4), ==,
-+                    (uint32_t)ldl_be_p(buf + len - 4));
-+    *n = len / 4 - 1;
-+    for (unsigned k = 0; k < *n; k++) {
-+        w[k] = (uint32_t)ldl_be_p(buf + 4 * k);
-+    }
-+    t->rx_next = (i + 1) % RING_N;
-+    rx_post(t, 1);
-+    return pdf;
-+}
-+
-+/* Acknowledge a hot plug event (Spec 6.8, Table 6-12) */
-+static void hp_ack(T *t, const uint32_t *w)
-+{
-+    uint32_t a[3] = {
-+        w[0] & 0x7fffffffu, w[1],
-+        7 | ((w[2] & 0x3f) << 8) | ((w[2] >> 31 ? 3u : 2u) << 30),
-+    };
-+
-+    tx_frame(t, PDF_NOTIFY, a, 3);
-+}
-+
-+/* The next frame other than a hot plug event (acked), waited for */
-+static unsigned rx_wait(T *t, uint32_t *w, unsigned *n, int tries)
-+{
-+    for (int i = 0; i < tries; i++) {
-+        unsigned pdf = rx_recv(t, w, n);
-+
-+        if (pdf == PDF_HOTPLUG) {
-+            hp_ack(t, w);
-+            i--;
-+            continue;
-+        }
-+        if (pdf) {
-+            return pdf;
-+        }
-+        step(t, 1);
-+    }
-+    return 0;
-+}
-+
-+/* Collect (acknowledge) pending hot plug events */
-+static void settle(T *t)
-+{
-+    uint32_t w[64];
-+    unsigned n;
-+
-+    for (int i = 0; i < 5; i++) {
-+        step(t, 20);
-+        while (rx_recv(t, w, &n)) {
-+            hp_ack(t, w);
-+        }
-+    }
-+}
-+
-+static void ctl_send(T *t, unsigned pdf, uint64_t route, unsigned cs,
-+                     unsigned adp, unsigned off, unsigned n,
-+                     const uint32_t *in)
-+{
-+    uint32_t f[3 + 16];
-+
-+    f[0] = route >> 32;
-+    f[1] = (uint32_t)route;
-+    f[2] = off | (n << 13) | (adp << 19) | (cs << 25);
-+    if (pdf == PDF_WRITE) {
-+        memcpy(&f[3], in, 4 * n);
-+    }
-+    tx_frame(t, pdf, f, 3 + (pdf == PDF_WRITE ? n : 0));
-+}
-+
-+static void ctl_read(T *t, uint64_t route, unsigned cs, unsigned adp,
-+                     unsigned off, unsigned n, uint32_t *out)
-+{
-+    uint32_t w[64];
-+    unsigned got;
-+
-+    ctl_send(t, PDF_READ, route, cs, adp, off, n, NULL);
-+    g_assert_cmpuint(rx_wait(t, w, &got, 50), ==, PDF_READ);
-+    g_assert_cmpuint(got, ==, 3 + n);
-+    memcpy(out, &w[3], 4 * n);
-+}
-+
-+static uint32_t rd1(T *t, uint64_t route, unsigned cs, unsigned adp,
-+                    unsigned off)
-+{
-+    uint32_t v;
-+
-+    ctl_read(t, route, cs, adp, off, 1, &v);
-+    return v;
-+}
-+
-+static void ctl_write(T *t, uint64_t route, unsigned cs, unsigned adp,
-+                      unsigned off, unsigned n, const uint32_t *in)
-+{
-+    uint32_t w[64];
-+    unsigned got;
-+
-+    ctl_send(t, PDF_WRITE, route, cs, adp, off, n, in);
-+    g_assert_cmpuint(rx_wait(t, w, &got, 50), ==, PDF_WRITE);
-+}
-+
-+static void wr1(T *t, uint64_t route, unsigned cs, unsigned adp,
-+                unsigned off, uint32_t v)
-+{
-+    ctl_write(t, route, cs, adp, off, 1, &v);
-+}
-+
-+static void rmw(T *t, uint64_t route, unsigned cs, unsigned adp,
-+                unsigned off, uint32_t clr, uint32_t set)
-+{
-+    wr1(t, route, cs, adp, off, (rd1(t, route, cs, adp, off) & ~clr) | set);
-+}
-+
-+/* Capability @id in an adapter's chain (Spec 8.2.2) */
-+static unsigned adp_cap(T *t, uint64_t route, unsigned adp, unsigned id)
-+{
-+    unsigned ptr = rd1(t, route, CS_ADAPTER, adp, 1) & 0xff;
-+
-+    for (int n = 0; ptr && n < 16; n++) {
-+        uint32_t h = rd1(t, route, CS_ADAPTER, adp, ptr);
-+
-+        if (((h >> 8) & 0xff) == id) {
-+            return ptr;
-+        }
-+        ptr = h & 0xff;
-+    }
-+    g_assert_not_reached();
-+}
-+
-+/*
-+ * One path entry (Spec Table 8-22): @adp's HopID @hop to @out HopID
-+ * @ohop; PCIe weight 1, priority 3 (Guide Table 5-2); credits at a lane
-+ * adapter's ingress only.
-+ */
-+static void path(T *t, uint64_t route, unsigned adp, unsigned hop,
-+                 unsigned out, unsigned ohop, unsigned credits)
-+{
-+    uint32_t e[2] = {
-+        ohop | (out << 11) | (credits << 17) | (1u << 31),
-+        1 | (3 << 8) | (credits ? 1u << 24 : (1u << 25 | 1u << 27)),
-+    };
-+
-+    ctl_write(t, route, CS_PATH, adp, 2 * hop, 2, e);
-+}
-+
-+static void path_clear(T *t, uint64_t route, unsigned adp, unsigned hop)
-+{
-+    uint32_t e[2] = { 0, 0 };
-+
-+    ctl_write(t, route, CS_PATH, adp, 2 * hop, 2, e);
-+}
-+
-+/* ------------------------------------------------------------------ */
-+/* Software connection manager (Guide 3.2, 5.3)                         */
-+/* ------------------------------------------------------------------ */
-+
-+/* Guide 3.2.1: the host router, Valid and CMUV 1.0 */
-+static void cm_host(T *t)
-+{
-+    uint32_t v[4];
-+
-+    ctl_read(t, 0, CS_ROUTER, 0, 1, 4, v);
-+    v[2] |= 1u << 31;
-+    v[3] = (v[3] & ~0xff00u) | 0x1000;
-+    ctl_write(t, 0, CS_ROUTER, 0, 1, 4, v);
-+    settle(t);
-+}
-+
-+/*
-+ * The device router on host port 1 at route 1: Lock cleared on the host
-+ * lane adapter, ROUTER_CS_1-4, then PCIe Tunneling On and Configuration
-+ * Valid, Configuration Ready waited for.
-+ */
-+static void cm_device(T *t)
-+{
-+    uint32_t v[4];
-+    int i;
-+
-+    rmw(t, 0, CS_ADAPTER, H_LANE, 4, 1u << 31, 0);
-+    settle(t);
-+    ctl_read(t, 1, CS_ROUTER, 0, 1, 4, v);
-+    v[0] = (v[0] & ~(7u << 20)) | (1u << 20);
-+    v[1] = 1;
-+    v[2] = 1u << 31;
-+    v[3] = (v[3] & ~0xff00u) | 0x1000;
-+    ctl_write(t, 1, CS_ROUTER, 0, 1, 4, v);
-+    rmw(t, 1, CS_ROUTER, 0, 5, 0, RT_PTO);
-+    rmw(t, 1, CS_ROUTER, 0, 5, 0, RT_CV);
-+    for (i = 0; i < 40 && !(rd1(t, 1, CS_ROUTER, 0, 6) & RT_CR); i++) {
-+        step(t, 10);
-+    }
-+    g_assert_cmpint(i, <, 40);
-+}
-+
-+/* Guide 5.3.1: paths both ways, then Path Enable on Down, then on Up */
-+static void cm_pcie_up(T *t)
-+{
-+    unsigned cd = adp_cap(t, 0, H_PCIE, CAP_PROTO);
-+    unsigned cu = adp_cap(t, 1, D_PCIE, CAP_PROTO);
-+
-+    path(t, 0, H_PCIE, HOP, H_LANE, HOP, 0);
-+    path(t, 1, D_LANE, HOP, D_PCIE, HOP, 16);
-+    path(t, 1, D_PCIE, HOP, D_LANE, HOP, 0);
-+    path(t, 0, H_LANE, HOP, H_PCIE, HOP, 16);
-+    rmw(t, 0, CS_ADAPTER, H_PCIE, cd, 0, PCIE_PE);
-+    rmw(t, 1, CS_ADAPTER, D_PCIE, cu, 0, PCIE_PE);
-+}
-+
-+/*
-+ * Guide 5.3.2, as Linux tb_pci_activate(false) then the path
-+ * deactivation: Path Enable cleared on Down (the tunnel goes down here),
-+ * then on Up, then the paths.
-+ */
-+static void cm_pcie_down(T *t)
-+{
-+    unsigned cd = adp_cap(t, 0, H_PCIE, CAP_PROTO);
-+    unsigned cu = adp_cap(t, 1, D_PCIE, CAP_PROTO);
-+
-+    rmw(t, 0, CS_ADAPTER, H_PCIE, cd, PCIE_PE, 0);
-+    rmw(t, 1, CS_ADAPTER, D_PCIE, cu, PCIE_PE, 0);
-+    path_clear(t, 0, H_PCIE, HOP);
-+    path_clear(t, 1, D_LANE, HOP);
-+    path_clear(t, 1, D_PCIE, HOP);
-+    path_clear(t, 0, H_LANE, HOP);
-+}
-+
-+/*
-+ * The CM builds the tunnel; a fresh endpoint (generation above @after)
-+ * is inserted and mapped. Returns its generation.
-+ */
-+static unsigned bring_up(T *t, unsigned after)
-+{
-+    g_autofree char *id = NULL;
-+    unsigned gen;
-+
-+    cm_pcie_up(t);
-+    wait_stage(t, "inserted", NULL);
-+    gen = live_gen(t);
-+    g_assert_cmpuint(gen, >, after);
-+    id = g_strdup_printf("tp0-nvme%u", gen);
-+    g_assert(peripheral_exists(t, id));
-+    g_assert_cmphex(cfg_readl(t, 1, 0, 0x00), ==, 0x00101b36);
-+    cfg_writel(t, 1, 0, 0x10, WIN_MEM);
-+    cfg_writel(t, 1, 0, 0x14, 0);
-+    cfg_writel(t, 1, 0, 0x04, 0x0006);
-+    g_assert_cmphex(qtest_readl(t->qts, WIN_MEM + NVME_VS), !=, 0xffffffff);
-+    g_assert_cmphex(link_sta(t) & LNKSTA_DLLLA, ==, LNKSTA_DLLLA);
-+    g_assert_cmphex(slot_sta(t) & SLTSTA_PDS, ==, SLTSTA_PDS);
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    return gen;
-+}
-+
-+static T *t_start_cm(const char *tp_opts)
-+{
-+    T *t = t_start(tp_opts);
-+
-+    rings_setup(t);
-+    cm_host(t);
-+    cm_device(t);
-+    return t;
-+}
-+
-+/* ------------------------------------------------------------------ */
-+/* Tests                                                                */
-+/* ------------------------------------------------------------------ */
-+
-+/*
-+ * The CM tears the tunnel down and builds it again to the same router
-+ * (Linux's S3 resume): the endpoint is the same object and generation
-+ * throughout. The link goes down (DLLLA clear, DLLSC) with presence
-+ * kept, the endpoint is reset (stage 2, BAR and Command cleared) and
-+ * held; when the tunnel is back the gate opens and the link comes up
-+ * (DLLLA, DLLSC); the guest restores the BAR and reaches the controller.
-+ * A second bounce with the bottom half held (x-hold-deferred) has the
-+ * tunnel back before the endpoint was reset: it is reset, then live.
-+ */
-+static void test_retrain_keeps(void)
-+{
-+    T *t = t_start_cm(NULL);
-+    g_autoptr(GString) seen = g_string_new("");
-+
-+    g_assert_true(qom_get_bool(t, TP0, "link-retrain"));
-+    g_assert_cmpuint(bring_up(t, 0), ==, 1);
-+
-+    cm_pcie_down(t);
-+    {
-+        /* one read: the bottom half may or may not have reset it yet */
-+        g_autofree char *s = qom_get_str(t, TP0, "endpoint");
-+
-+        g_assert(g_str_has_prefix(s, "quiesced gen=1 gate=closed retrain") ||
-+                 g_str_has_prefix(s, "doomed gen=1 gate=closed retrain"));
-+    }
-+    g_assert_cmphex(qtest_readl(t->qts, WIN_MEM + NVME_VS), ==, 0xffffffff);
-+    g_assert_cmphex(cfg_readl(t, 1, 0, 0x00), ==, 0xffffffff);
-+    g_assert_cmphex(link_sta(t) & LNKSTA_DLLLA, ==, 0);
-+    g_assert_cmphex(slot_sta(t) & (SLTSTA_PDS | SLTSTA_PDC | SLTSTA_DLLSC),
-+                    ==, SLTSTA_PDS | SLTSTA_DLLSC);
-+    wait_stage(t, "retrain-held", seen);
-+    g_assert_cmpstr(seen->str, ==, "gated cutoff retrain-held ");
-+    step(t, 5000);      /* no timeout: held while the router stays */
-+    g_assert(ep_is(t, "quiesced gen=1 gate=closed retrain"));
-+    g_assert(peripheral_exists(t, "tp0-nvme1"));
-+    slot_ack(t, SLTSTA_DLLSC);
-+
-+    g_string_truncate(seen, 0);
-+    cm_pcie_up(t);
-+    wait_stage(t, "retrained", seen);
-+    g_assert_cmpstr(seen->str, ==, "retrained ");
-+    g_assert(ep_is(t, "live gen=1 gate=open"));
-+    g_assert(peripheral_exists(t, "tp0-nvme1"));
-+    g_assert(!peripheral_exists(t, "tp0-nvme2"));
-+    g_assert_cmphex(link_sta(t) & LNKSTA_DLLLA, ==, LNKSTA_DLLLA);
-+    g_assert_cmphex(slot_sta(t) & (SLTSTA_PDS | SLTSTA_PDC | SLTSTA_DLLSC),
-+                    ==, SLTSTA_PDS | SLTSTA_DLLSC);
-+    /* reset by the link loss: BAR and Command clear; restored, it works */
-+    g_assert_cmphex(cfg_readl(t, 1, 0, 0x00), ==, 0x00101b36);
-+    g_assert_cmphex(cfg_readl(t, 1, 0, 0x10) & ~0xfu, ==, 0);
-+    g_assert_cmphex(cfg_readl(t, 1, 0, 0x04) & 0x6, ==, 0);
-+    cfg_writel(t, 1, 0, 0x10, WIN_MEM);
-+    cfg_writel(t, 1, 0, 0x04, 0x0006);
-+    g_assert_cmphex(qtest_readl(t->qts, WIN_MEM + NVME_VS), !=, 0xffffffff);
-+    g_assert_cmphex(qtest_readl(t->qts, WIN_MEM + NVME_CSTS) & 1, ==, 0);
-+    slot_ack(t, SLTSTA_DLLSC);
-+
-+    /* down and up again before the bottom half runs */
-+    qom_set_bool(t, TP0, "x-hold-deferred", true);
-+    cm_pcie_down(t);
-+    cm_pcie_up(t);
-+    g_assert(ep_is(t, "doomed gen=1 gate=closed retrain"));
-+    g_string_truncate(seen, 0);
-+    qom_set_bool(t, TP0, "x-hold-deferred", false);
-+    wait_stage(t, "retrained", seen);
-+    g_assert_cmpstr(seen->str, ==, "gated cutoff retrained ");
-+    g_assert(ep_is(t, "live gen=1 gate=open"));
-+    g_assert_cmphex(cfg_readl(t, 1, 0, 0x10) & ~0xfu, ==, 0);
-+    t_stop(t);
-+}
-+
-+/*
-+ * link-retrain=off (the hot-plug contract before it): the same CM
-+ * teardown surprise-removes the endpoint (presence cleared), and the
-+ * rebuilt tunnel gets a fresh one (generation 2) once the guest has
-+ * acknowledged the empty slot.
-+ */
-+static void test_retrain_off(void)
-+{
-+    T *t = t_start_cm(",link-retrain=off");
-+    g_autoptr(GString) seen = g_string_new("");
-+
-+    g_assert_false(qom_get_bool(t, TP0, "link-retrain"));
-+    g_assert_cmpuint(bring_up(t, 0), ==, 1);
-+    cm_pcie_down(t);
-+    wait_stage(t, "removed", seen);
-+    g_assert_cmpstr(seen->str, ==, "gated cutoff removed ");
-+    g_assert(!peripheral_exists(t, "tp0-nvme1"));
-+    g_assert_cmphex(slot_sta(t) & (SLTSTA_PDS | SLTSTA_PDC), ==,
-+                    SLTSTA_PDC);
-+    g_assert_cmphex(link_sta(t) & LNKSTA_DLLLA, ==, 0);
-+
-+    cm_pcie_up(t);
-+    step(t, 10);
-+    g_assert(ep_is(t, "none gen=1 gate=closed awaiting-ack"));
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    wait_stage(t, "inserted", NULL);
-+    g_assert_cmpuint(live_gen(t), >, 1);
-+    t_stop(t);
-+}
-+
-+/*
-+ * A real unplug while the endpoint is held for a retrain removes it at
-+ * once (x-cable, then device_del), as does a host router reset (every
-+ * router starts a new attachment life). The tunnel to the router plugged
-+ * back gets a fresh endpoint.
-+ */
-+static void test_retrain_unplug(void)
-+{
-+    T *t = t_start_cm(NULL);
-+    g_autoptr(GString) seen = g_string_new("");
-+    g_autofree char *id2 = NULL, *id3 = NULL;
-+    unsigned gen;
-+
-+    g_assert_cmpuint(bring_up(t, 0), ==, 1);
-+    cm_pcie_down(t);
-+    wait_stage(t, "retrain-held", NULL);
-+
-+    /* the cable is pulled while held */
-+    qom_set_bool(t, ENC0, "x-cable", false);
-+    wait_stage(t, "removed", seen);
-+    g_assert_cmpstr(seen->str, ==, "removed ");
-+    g_assert(!peripheral_exists(t, "tp0-nvme1"));
-+    g_assert_cmphex(slot_sta(t) & SLTSTA_PDS, ==, 0);
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+
-+    /* back in: a new attachment, so a fresh endpoint */
-+    qom_set_bool(t, ENC0, "x-cable", true);
-+    settle(t);
-+    cm_device(t);
-+    gen = bring_up(t, 1);
-+    id2 = g_strdup_printf("tp0-nvme%u", gen);
-+
-+    /* device_del while held */
-+    cm_pcie_down(t);
-+    wait_stage(t, "retrain-held", NULL);
-+    g_string_truncate(seen, 0);
-+    qtest_qmp_assert_success(t->qts, "{'execute': 'device_del', "
-+                             "'arguments': {'id': 'enc0'}}");
-+    wait_stage(t, "removed", seen);
-+    g_assert_cmpstr(seen->str, ==, "removed ");
-+    g_assert(!peripheral_exists(t, id2));
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    qtest_qmp_assert_success(t->qts, "{'execute': 'device_add', "
-+                             "'arguments': {'driver': 'usb4-device', "
-+                             "'id': 'enc0', 'bus': 'u4.0', 'port': 1, "
-+                             "'drive': 'nvme0', 'serial': 'QTRETRAIN'}}");
-+    settle(t);
-+    cm_device(t);
-+    gen = bring_up(t, gen);
-+    id3 = g_strdup_printf("tp0-nvme%u", gen);
-+
-+    /* host router reset while held: the routers lose their config */
-+    cm_pcie_down(t);
-+    wait_stage(t, "retrain-held", NULL);
-+    g_string_truncate(seen, 0);
-+    qom_set_str(t, U4, "x-host-reset", "router");
-+    wait_stage(t, "removed", seen);
-+    g_assert_cmpstr(seen->str, ==, "removed ");
-+    g_assert(!peripheral_exists(t, id3));
-+    t_stop(t);
-+}
-+
-+/*
-+ * The tunnel property and the harness are test stimuli, not a CM: with
-+ * link-retrain on, tunnel=down still removes the endpoint, and the
-+ * forced tunnel=up inserts a fresh one. A stimulus while the endpoint is
-+ * held for a retrain ends the retrain: down removes it, and up replaces
-+ * it with a fresh one.
-+ */
-+static void test_retrain_stimulus(void)
-+{
-+    T *t = t_start_cm(NULL);
-+    g_autoptr(GString) seen = g_string_new("");
-+
-+    g_assert_cmpuint(bring_up(t, 0), ==, 1);
-+    qom_set_str(t, TP0, "tunnel", "down");
-+    wait_stage(t, "removed", seen);
-+    g_assert_cmpstr(seen->str, ==, "gated cutoff removed ");
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    qom_set_str(t, TP0, "tunnel", "up");
-+    wait_stage(t, "inserted", NULL);
-+    g_assert_cmpuint(live_gen(t), >, 1);
-+    t_stop(t);
-+}
-+
-+static void test_retrain_stimulus_held(void)
-+{
-+    T *t = t_start_cm(NULL);
-+    g_autoptr(GString) seen = g_string_new("");
-+    unsigned gen;
-+
-+    /* held, then tunnel=down: removed, not held */
-+    g_assert_cmpuint(bring_up(t, 0), ==, 1);
-+    cm_pcie_down(t);
-+    wait_stage(t, "retrain-held", NULL);
-+    qom_set_str(t, TP0, "tunnel", "down");
-+    wait_stage(t, "removed", seen);
-+    g_assert(!peripheral_exists(t, "tp0-nvme1"));
-+    g_assert_cmphex(slot_sta(t) & SLTSTA_PDS, ==, 0);
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    /* the CM's tunnel back: a fresh endpoint, which a retrain keeps */
-+    cm_pcie_up(t);
-+    wait_stage(t, "inserted", NULL);
-+    gen = live_gen(t);
-+    g_assert_cmpuint(gen, >, 1);
-+
-+    /* held, then a forced tunnel=up: replaced by a fresh endpoint */
-+    cm_pcie_down(t);
-+    wait_stage(t, "retrain-held", NULL);
-+    g_string_truncate(seen, 0);
-+    qom_set_str(t, TP0, "tunnel", "up");
-+    wait_stage(t, "removed", seen);
-+    g_assert(strstr(seen->str, "retrained") == NULL);
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    wait_stage(t, "inserted", NULL);
-+    g_assert_cmpuint(live_gen(t), >, gen);
-+    t_stop(t);
-+}
-+
-+/*
-+ * The guest powers the slot off while the endpoint is held (Linux
-+ * pciehp on a runtime Link Down): the endpoint goes now, and the tunnel
-+ * coming back inserts a fresh one, which waits for the guest to power
-+ * the slot again.
-+ */
-+static void test_retrain_guest_off(void)
-+{
-+    T *t = t_start_cm(NULL);
-+    g_autoptr(GString) seen = g_string_new("");
-+
-+    g_assert_cmpuint(bring_up(t, 0), ==, 1);
-+    cm_pcie_down(t);
-+    wait_stage(t, "retrain-held", NULL);
-+    /* Slot Control: Power Controller Control off, power indicator off */
-+    cfg_writew(t, 0, TP_DEVFN, t->exp + EXP_SLTCTL, 0x0700);
-+    wait_stage(t, "removed", seen);
-+    g_assert_cmpstr(seen->str, ==, "removed ");
-+    g_assert(!peripheral_exists(t, "tp0-nvme1"));
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    cm_pcie_up(t);
-+    wait_stage(t, "inserted", NULL);
-+    g_assert(!peripheral_exists(t, "tp0-nvme1"));
-+    g_assert(ep_is(t, "live gen="));
-+    g_assert(!ep_is(t, "live gen=1 "));
-+    t_stop(t);
-+}
-+
-+/*
-+ * ACPI S3 through the ICH9 PM1 control register (SLP_TYP 1, SLP_EN),
-+ * then system_wakeup: the machine's wakeup reset.
-+ */
-+#define PMBASE          0x600
-+static void s3_cycle(T *t)
-+{
-+    cfg_writel(t, 0, (0x1f << 3), 0x40, PMBASE | 1);
-+    cfg_writel(t, 0, (0x1f << 3), 0x44, 0x80);
-+    qtest_outw(t->qts, PMBASE + 4, (1u << 10) | (1u << 13));
-+    qtest_qmp_eventwait(t->qts, "SUSPEND");
-+    qtest_qmp_assert_success(t->qts, "{'execute': 'system_wakeup'}");
-+    qtest_qmp_eventwait(t->qts, "WAKEUP");
-+}
-+
-+/*
-+ * Linux's S3 under QEMU: the wakeup reset resets every router (the PCIe
-+ * tunnel goes down there), the CM configures them again and restores
-+ * the tunnel. The device router never left, so the endpoint is kept:
-+ * same generation and object, reset, reachable once the guest restores
-+ * the bridge and the BAR. A cold system_reset is a new attachment: the
-+ * endpoint is removed and the rebuilt tunnel gets a fresh one.
-+ */
-+static void test_retrain_s3(void)
-+{
-+    T *t = t_start_cm(NULL);
-+    g_autoptr(GString) seen = g_string_new("");
-+    unsigned gen;
-+
-+    g_assert_cmpuint(bring_up(t, 0), ==, 1);
-+    s3_cycle(t);
-+    /* "gated" came with the reset, before WAKEUP */
-+    wait_stage(t, "retrain-held", seen);
-+    g_assert_cmpstr(seen->str, ==, "cutoff retrain-held ");
-+    g_assert(peripheral_exists(t, "tp0-nvme1"));
-+    /* the guest's resume: bridge, host interface, CM, tunnel */
-+    tp_setup(t);
-+    g_assert_cmphex(slot_sta(t) & SLTSTA_PDS, ==, SLTSTA_PDS);
-+    g_assert_cmphex(link_sta(t) & LNKSTA_DLLLA, ==, 0);
-+    rings_setup(t);
-+    cm_host(t);
-+    cm_device(t);
-+    g_string_truncate(seen, 0);
-+    cm_pcie_up(t);
-+    wait_stage(t, "retrained", seen);
-+    g_assert_cmpstr(seen->str, ==, "retrained ");
-+    g_assert(ep_is(t, "live gen=1 gate=open"));
-+    g_assert_cmphex(link_sta(t) & LNKSTA_DLLLA, ==, LNKSTA_DLLLA);
-+    g_assert_cmphex(cfg_readl(t, 1, 0, 0x00), ==, 0x00101b36);
-+    cfg_writel(t, 1, 0, 0x10, WIN_MEM);
-+    cfg_writel(t, 1, 0, 0x04, 0x0006);
-+    g_assert_cmphex(qtest_readl(t->qts, WIN_MEM + NVME_VS), !=, 0xffffffff);
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+
-+    /* a cold reset: removed, then a fresh endpoint */
-+    g_string_truncate(seen, 0);
-+    qtest_qmp_assert_success(t->qts, "{'execute': 'system_reset'}");
-+    wait_stage(t, "removed", seen);
-+    g_assert_cmpstr(seen->str, ==, "gated cutoff removed ");
-+    g_assert(!peripheral_exists(t, "tp0-nvme1"));
-+    tp_setup(t);
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    rings_setup(t);
-+    cm_host(t);
-+    cm_device(t);
-+    gen = bring_up(t, 1);
-+    g_assert_cmpuint(gen, >, 1);
-+    t_stop(t);
-+}
-+
-+/*
-+ * preos-cm=on (USB4-HOSTS.md): the tunnel the firmware CM builds stays up
-+ * across a cold reset and keeps its endpoint, which then stands for the
-+ * router in the attachment life the reset began. The OS CM's teardown
-+ * and rebuild after the reset is a link retrain (review r2 #2). With
-+ * link-retrain=off the same teardown removes it and the rebuild inserts
-+ * a fresh one.
-+ */
-+static unsigned preos_reset(T *t)
-+{
-+    unsigned gen;
-+
-+    rings_setup(t);                 /* the OS takes over (preos ends) */
-+    gen = live_gen(t);
-+    g_assert_cmpuint(gen, >, 0);
-+    qtest_qmp_assert_success(t->qts, "{'execute': 'system_reset'}");
-+    qtest_qmp_eventwait(t->qts, "RESET");
-+    g_assert_cmpuint(live_gen(t), ==, gen);
-+    tp_setup(t);
-+    rings_setup(t);
-+    return gen;
-+}
-+
-+static void test_retrain_preos_reset(void)
-+{
-+    T *t = t_start_host(NULL, ",preos-cm=on");
-+    g_autoptr(GString) seen = g_string_new("");
-+    unsigned gen = preos_reset(t);
-+
-+    cm_pcie_down(t);
-+    wait_stage(t, "retrain-held", seen);
-+    g_assert(strstr(seen->str, "removed") == NULL);
-+    g_string_truncate(seen, 0);
-+    cm_pcie_up(t);
-+    wait_stage(t, "retrained", seen);
-+    g_assert_cmpstr(seen->str, ==, "retrained ");
-+    g_assert_cmpuint(live_gen(t), ==, gen);
-+    t_stop(t);
-+
-+    t = t_start_host(",link-retrain=off", ",preos-cm=on");
-+    gen = preos_reset(t);
-+    g_string_truncate(seen, 0);
-+    cm_pcie_down(t);
-+    wait_stage(t, "removed", seen);
-+    g_assert(strstr(seen->str, "retrain") == NULL);
-+    slot_ack(t, SLTSTA_PDC | SLTSTA_DLLSC);
-+    cm_pcie_up(t);
-+    wait_stage(t, "inserted", NULL);
-+    g_assert_cmpuint(live_gen(t), >, gen);
-+    t_stop(t);
-+}
-+
-+/*
-+ * The same with a daisy chain (review r3 #1): enc0 with a downstream USB4
-+ * port, enc1 behind it. The pre-OS CM builds both PCIe tunnels and keeps
-+ * both up across the cold reset; the chained one's target is enc0's
-+ * usb4-tunnel-dsp, whose endpoint (enc1's NVMe) must stand for enc1 in
-+ * its new life. The OS CM bouncing enc0's PCIe Down adapter for that
-+ * port (Path Enable off, then on) is a retrain there.
-+ */
-+#define DSP1    "/machine/peripheral/tp0-sw1-usb4dp1"
-+#define ADP_TYPE_PCIE_DOWN 0x00100101u   /* Spec Table 8-26 */
-+
-+static unsigned dsp_gen(T *t)
-+{
-+    g_autofree char *s = qom_get_str(t, DSP1, "endpoint");
-+    unsigned gen = 0;
-+
-+    g_assert(sscanf(s, "live gen=%u", &gen) == 1);
-+    return gen;
-+}
-+
-+static void test_retrain_preos_chain(void)
-+{
-+    T *t = t_new(NULL,
-+        "-machine q35 -nodefaults "
-+        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
-+        "-drive if=none,id=d0,file=null-co://,format=raw "
-+        "-drive if=none,id=d1,file=null-co://,format=raw "
-+        "-device usb4-tunnel-port,id=tp0,bus=pcie.0,addr=0x3,chassis=1,"
-+        "settle-ms=200 "
-+        "-device usb4-host,id=u4,bus=pcie.0,addr=0x4,tunnel-port=tp0,"
-+        "msi=off,msix=off,preos-cm=on "
-+        "-device usb4-device,id=enc0,bus=u4.0,port=1,drive=d0,"
-+        "serial=QTCHAIN0,downstream-ports=1 "
-+        "-device usb4-device,id=enc1,bus=u4.0,parent=enc0,port=1,"
-+        "drive=d1,serial=QTCHAIN1");
-+    g_autoptr(GString) seen = g_string_new("");
-+    unsigned gen0, gen1, pd = 0, cap, max;
-+
-+    rings_setup(t);
-+    gen0 = live_gen(t);
-+    gen1 = dsp_gen(t);
-+    qtest_qmp_assert_success(t->qts, "{'execute': 'system_reset'}");
-+    qtest_qmp_eventwait(t->qts, "RESET");
-+    g_assert_cmpuint(live_gen(t), ==, gen0);
-+    g_assert_cmpuint(dsp_gen(t), ==, gen1);
-+    tp_setup(t);
-+    rings_setup(t);
-+
-+    /* enc0 (route 1): its PCIe Down adapter, from ROUTER_CS_1 Max Adapter */
-+    max = (rd1(t, 1, CS_ROUTER, 0, 1) >> 14) & 0x3f;
-+    for (unsigned a = 1; a <= max && !pd; a++) {
-+        if ((rd1(t, 1, CS_ADAPTER, a, 2) & 0x00ffffff) == ADP_TYPE_PCIE_DOWN) {
-+            pd = a;
-+        }
-+    }
-+    g_assert_cmpuint(pd, !=, 0);
-+    cap = adp_cap(t, 1, pd, CAP_PROTO);
-+    rmw(t, 1, CS_ADAPTER, pd, cap, PCIE_PE, 0);
-+    wait_stage(t, "retrain-held", seen);
-+    g_assert(strstr(seen->str, "removed") == NULL);
-+    g_assert(ep_is(t, "live"));       /* the outer tunnel is untouched */
-+    g_string_truncate(seen, 0);
-+    rmw(t, 1, CS_ADAPTER, pd, cap, 0, PCIE_PE);
-+    wait_stage(t, "retrained", seen);
-+    g_assert_cmpstr(seen->str, ==, "retrained ");
-+    g_assert_cmpuint(dsp_gen(t), ==, gen1);
-+    t_stop(t);
-+}
-+
-+/* SHPC (usb4-tunnel-bridge, i440FX): off by default */
-+static void test_retrain_bridge_default(void)
-+{
-+    QTestState *qts = qtest_init("-machine pc -nodefaults -global "
-+                                 "PIIX4_PM.acpi-pci-hotplug-with-bridge-"
-+                                 "support=off "
-+                                 "-device usb4-tunnel-bridge,id=tb0,"
-+                                 "bus=pci.0,addr=0x5,chassis_nr=1");
-+    QDict *rsp = qtest_qmp(qts, "{'execute': 'qom-get', 'arguments': "
-+                           "{'path': '/machine/peripheral/tb0', "
-+                           "'property': 'link-retrain'}}");
-+
-+    g_assert_false(qdict_get_bool(rsp, "return"));
-+    qobject_unref(rsp);
-+    qtest_quit(qts);
-+}
-+
-+int main(int argc, char **argv)
-+{
-+    g_test_init(&argc, &argv, NULL);
-+    qtest_add_func("/usb4-retrain/keeps", test_retrain_keeps);
-+    qtest_add_func("/usb4-retrain/off", test_retrain_off);
-+    qtest_add_func("/usb4-retrain/unplug", test_retrain_unplug);
-+    qtest_add_func("/usb4-retrain/stimulus", test_retrain_stimulus);
-+    qtest_add_func("/usb4-retrain/stimulus-held",
-+                   test_retrain_stimulus_held);
-+    qtest_add_func("/usb4-retrain/guest-off", test_retrain_guest_off);
-+    qtest_add_func("/usb4-retrain/s3", test_retrain_s3);
-+    qtest_add_func("/usb4-retrain/preos-reset", test_retrain_preos_reset);
-+    qtest_add_func("/usb4-retrain/preos-chain", test_retrain_preos_chain);
-+    qtest_add_func("/usb4-retrain/bridge-default",
-+                   test_retrain_bridge_default);
 +    return g_test_run();
 +}
 diff --git a/tests/qtest/usb4-root-hotplug-test.c b/tests/qtest/usb4-root-hotplug-test.c
@@ -42776,10 +41524,10 @@ index 0000000000000000000000000000000000000000..567609b1234a9b8806c5a05da6c866e4
 +build/
 diff --git a/tests/usb4/adl-conformance.c b/tests/usb4/adl-conformance.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869e387fd58
+index 0000000000000000000000000000000000000000..a9459a8eeaf4de860f8fff18991ec3a401e80a29
 --- /dev/null
 +++ b/tests/usb4/adl-conformance.c
-@@ -0,0 +1,772 @@
+@@ -0,0 +1,1025 @@
 +/*
 + * Real host conformance check for the intel-adl host model: replay the
 + * Linux software CM's host router (route 0) requests captured on a
@@ -42963,9 +41711,19 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +static uint64_t rw_route;
 +static bool rw_pending;
 +
++#ifdef FABRIC_TEST_ICM
++static void icm_take(Frame *f);
++#endif
++
 +static void take_frame(Frame *f, int *err, uint32_t *data, unsigned n,
 +                       bool *got)
 +{
++#ifdef FABRIC_TEST_ICM
++    if (f->pdf == USB4_PDF_ICM_EVENT || f->pdf == USB4_PDF_ICM_RESP) {
++        icm_take(f);
++        return;
++    }
++#endif
 +    if (f->pdf == USB4_PDF_HOTPLUG && ((f->dw[0] & 0xffffff) || f->dw[1])) {
 +        /*
 +         * A device router's event (the TB3 dock sends some): the replay
@@ -43021,6 +41779,130 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +}
 +
 +static void drain(void);
++
++#ifdef FABRIC_TEST_ICM
++/*
++ * Alpine Ridge replay (D record "ar", ar-replay: tests/usb4/
++ * run-ar-conformance.sh): the emulated firmware CM (usb4-icm.c) owns the
++ * fabric as in usb4-host, the client's ICM commands are replayed to it
++ * (C records) and its responses (Q) and events (N) compared with the
++ * captured ones; config reads and writes are compared as for the other
++ * hosts.
++ */
++void usb4_host_usb_mode_changed(USB4Host *h)
++{
++}
++
++static USB4ICM *icm;
++static Frame icmq[64];              /* model ICM frames not yet compared */
++static unsigned icm_n;
++static unsigned long icm_dr;        /* driver ready commands sent */
++static uint32_t last_conn[6];       /* words 0-5 of the last connection */
++static bool have_conn;
++/* [0] responses, [1] connected, [2] disconnected events */
++static unsigned long icm_cap[3], icm_ok[3], icm_extra;
++
++static void icm_take(Frame *f)
++{
++    if (f->pdf == USB4_PDF_ICM_EVENT && (f->dw[0] & 0xff) == 3 &&
++        f->ndw >= 6) {
++        memcpy(last_conn, f->dw, sizeof(last_conn));
++        have_conn = true;
++    }
++    if (icm_n == ARRAY_SIZE(icmq)) {
++        memmove(&icmq[0], &icmq[1], --icm_n * sizeof(Frame));
++        icm_extra++;
++    }
++    icmq[icm_n++] = *f;
++}
++
++/* The oldest model frame of @pdf and ICM code @code, removed; or NULL */
++static bool icm_pop(uint8_t pdf, unsigned code, Frame *out)
++{
++    for (unsigned i = 0; i < icm_n; i++) {
++        if (icmq[i].pdf == pdf && (icmq[i].dw[0] & 0xff) == code) {
++            *out = icmq[i];
++            memmove(&icmq[i], &icmq[i + 1], (--icm_n - i) * sizeof(Frame));
++            return true;
++        }
++    }
++    return false;
++}
++
++static void icm_command(uint32_t *w, unsigned n)
++{
++    uint8_t frame[USB4_CTL_MAX_FRAME];
++    size_t len;
++    unsigned code = w[0] & 0xff;
++
++    if (code == 3 && icm_dr++) {
++        /* the client unloaded (rebind, runtime suspend): mailbox 0x07 */
++        usb4_icm_mailbox(icm, 0x07, 0);
++    }
++    if (code == 4 && have_conn && n >= 6) {
++        /*
++         * Approve names the device as the firmware announced it: the
++         * model's UUID, key and connection id (4.3), not the captured
++         * ones (the emulated dock has its own DROM UID).
++         */
++        memcpy(&w[1], &last_conn[1], 4 * 4);
++        w[5] = (w[5] & ~0xffffu) | (last_conn[5] & 0xffff);
++    }
++    for (unsigned i = 0; i < n; i++) {
++        usb4_put_be32(frame + 4 * i, w[i]);
++    }
++    len = usb4_ctl_frame_seal(frame, n * 4);
++    usb4_icm_tx_frame(icm, frame, len);
++}
++
++static void icm_compare(bool event, uint32_t *w, unsigned n, double t)
++{
++    unsigned code = w[0] & 0xff, k;
++    Frame f;
++    bool ok;
++
++    k = !event ? 0 : code == 3 ? 1 : 2;
++    icm_cap[k]++;
++    if (!icm_pop(event ? USB4_PDF_ICM_EVENT : USB4_PDF_ICM_RESP, code, &f)) {
++        note_miss(0, 0x800 | k, code, 0, w[0], 0, t);
++        if (verbose) {
++            printf("%.3f ICM %s %02x: none from the model\n", t,
++                   event ? "event" : "response", code);
++        }
++        return;
++    }
++    if (!event && code == 3) {
++        /* driver ready: byte-exact (R8) */
++        ok = f.ndw == n && !memcmp(f.dw, w, 4 * n);
++    } else if (!event && code == 4) {
++        /* approve: the header (flags 0 = tunnel up) and the length */
++        ok = f.ndw == n && f.dw[0] == w[0];
++    } else if (!event) {
++        ok = f.dw[0] == w[0];
++    } else if (code == 3) {
++        /*
++         * device connected (4.4): header with flags, link info, key and
++         * the unknown bit 27; not the UUID (the dock's own) nor the
++         * connection id (counted from the model's power-on)
++         */
++        ok = f.ndw == n && f.dw[0] == w[0] &&
++             (f.dw[5] & 0xffff00ff) == (w[5] & 0xffff00ff);
++    } else {
++        ok = f.ndw == n && f.dw[0] == w[0] && f.dw[1] == w[1];
++    }
++    icm_ok[k] += ok;
++    if (!ok) {
++        note_miss(0, 0x800 | k, code, 0, event && code == 3 ? w[5] : w[0],
++                  event && code == 3 ? f.dw[5] : f.dw[0], t);
++        if (verbose) {
++            printf("%.3f ICM %s %02x: want %08x %08x got %08x %08x\n", t,
++                   event ? "event" : "response", code, w[0],
++                   n > 5 ? w[5] : n > 1 ? w[1] : 0, f.dw[0],
++                   f.ndw > 5 ? f.dw[5] : f.ndw > 1 ? f.dw[1] : 0);
++        }
++    }
++}
++#endif
 +
 +/*
 + * Acknowledge model events the capture does not have, as the CM would,
@@ -43082,6 +41964,8 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +};
 +static USB4DeviceModel dev_model;
 +static USB4Dialect dev_dialect;     /* tb3: the TB3 device router preset */
++/* Alpine Ridge replay: a tb3 dock under the firmware CM, no LC UUID fixture */
++static bool ar_mode;
 +static bool present[2];
 +/* A device router chained behind the first one (D record, "303:asm2464") */
 +static USB4Device chain_dev = { .serial = "ADLCHAIN" };
@@ -43111,7 +41995,8 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +        adl_dev[port - 1].model = dev_model;
 +        adl_dev[port - 1].dialect = dev_dialect;
 +        /* the replayed dock: its captured link controller UUID */
-+        adl_dev[port - 1].lc_captured = dev_dialect == USB4_DIALECT_TB3;
++        adl_dev[port - 1].lc_captured = dev_dialect == USB4_DIALECT_TB3 &&
++                                        !ar_mode;
 +        adl_dev[port - 1].ndfp = chain_route ? 1 : 0;
 +        usb4_fabric_attach(fab, port, &adl_dev[port - 1], NULL);
 +        plug_chain(port);
@@ -43177,6 +42062,53 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +                                                      : USB4_DIALECT_USB4;
 +            }
 +            ev_epoch();
++#ifdef FABRIC_TEST_ICM
++            if (nt > 2 && !strcmp(tok[2], "ar")) {
++                /*
++                 * The P14s: Alpine Ridge LP host router with the captured
++                 * link controller UUID (ICM-PROTOCOL.md 5.1), the dock as
++                 * a tb3 device router with the captured names, and the
++                 * firmware CM as the capture shows it (driver ready
++                 * 0x0100e203 0x28010b60: RTD3, security user, ACL 16).
++                 */
++                static const uint8_t hu[16] = {
++                    0xcd, 0x01, 0x00, 0x00, 0x00, 0x82, 0x80, 0x88,
++                    0xa0, 0x59, 0x61, 0x8a, 0x10, 0xa1, 0x20, 0x02,
++                };
++                USB4ICMConfig icfg = {
++                    .dialect = USB4_ICM_DIALECT_AR, .device_id = 0x15bf,
++                    .security = 1, .rtd3 = true, .boot_acl_slots = 16,
++                };
++
++                cfg.profile = USB4_PROFILE_TB3_ALPINE_RIDGE;
++                cfg.dialect = USB4_DIALECT_TB3;
++                cfg.router_vendor_id = 0x8086;
++                cfg.router_device_id = 0x15c0;
++                cfg.num_usb4_ports = 1;
++                cfg.host_model = USB4_HOST_MODEL_MINIMAL;
++                memcpy(cfg.uuid.data, hu, sizeof(hu));
++                memset(icfg.boot_acl, 0xff, sizeof(icfg.boot_acl));
++                dev_dialect = USB4_DIALECT_TB3;
++                ar_mode = true;
++                fake_vendor_name = "CalDigit, Inc.";
++                fake_model_name = "TS3 Plus";
++                if (icm) {
++                    usb4_icm_free(icm);
++                }
++                fab = usb4_fabric_new((USB4Host *)&fake_host, &cfg);
++                icm = usb4_icm_new(fab, &icfg);
++                usb4_fabric_reset(fab);
++                icm_n = 0;
++                icm_dr = 0;
++                have_conn = false;
++                present[0] = present[1] = false;
++                n_mev = 0;
++                advance(10);
++                base = now_ms;
++                drain();
++                continue;
++            }
++#endif
 +            fab = usb4_fabric_new((USB4Host *)&fake_host, &cfg);
 +            present[0] = present[1] = false;
 +            n_mev = 0;
@@ -43189,6 +42121,29 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +            plug(atoi(tok[1]), atoi(tok[2]));
 +            advance(1);
 +            drain();
++#ifdef FABRIC_TEST_ICM
++            if (icm && present[0]) {
++                /*
++                 * The capture starts with the dock already approved by
++                 * an earlier client session (approved at T:9): replay
++                 * that session unseen (driver ready, approve, driver
++                 * unloads) and forget its frames.
++                 */
++                uint32_t dr = 3, ap[6] = { 4, 0, 0, 0, 0, 0x10 };
++
++                icm_command(&dr, 1);
++                advance(1);
++                drain();
++                icm_command(ap, 6);
++                advance(1);
++                drain();
++                usb4_icm_mailbox(icm, 0x07, 0);
++                advance(1);
++                drain();
++                icm_n = 0;
++                icm_dr = 0;
++            }
++#endif
 +            n_mev = 0;
 +            base = now_ms;
 +            continue;
@@ -43405,6 +42360,35 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +            usb4_fabric_reset(fab);
 +            drain();
 +            break;
++#ifdef FABRIC_TEST_ICM
++        case 'C': case 'Q': case 'N': {
++            uint32_t w[64];
++            unsigned n = MIN(nt - 2, 64);
++
++            for (unsigned i = 0; i < n; i++) {
++                w[i] = strtoul(tok[2 + i], NULL, 16);
++            }
++            if (tok[0][0] == 'C') {
++                icm_command(w, n);
++                drain();
++                break;
++            }
++            if (tok[0][0] == 'N' && (w[0] & 0xff) == 4 && present[0]) {
++                /* the captured unplug: pull the dock */
++                plug(1, false);
++                advance(1);
++                drain();
++            } else if (tok[0][0] == 'N' && (w[0] & 0xff) == 3 &&
++                       !present[0]) {
++                /* the captured plug */
++                plug(1, true);
++                advance(1);
++                drain();
++            }
++            icm_compare(tok[0][0] == 'N', w, n, t);
++            break;
++        }
++#endif
 +        case 'A': {
 +            uint32_t dw[3] = { 0, 0, USB4_HP_ACK | (atoi(tok[2]) << 8) |
 +                               ((atoi(tok[3]) ? 3u : 2u) << 30) };
@@ -43451,7 +42435,8 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +    printf("Mismatching registers (%scs adp off: count, first want/got):\n",
 +           v2 ? "route " : "");
 +    for (unsigned i = 0; i < n_miss && i < top; i++) {
-+        const char *what = miss[i].cs & 0x400 ? "hdr" :
++        const char *what = miss[i].cs & 0x800 ? "icm" :
++                           miss[i].cs & 0x400 ? "hdr" :
 +                           miss[i].cs & 0x200 ? "event" :
 +                           miss[i].cs & 0x100 ? "error" : "dword";
 +        char rt[24] = "";
@@ -43491,6 +42476,22 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +    }
 +    printf("hot plug events: %lu captured, %lu matched, %lu extra from "
 +           "the model\n", ev_cnt, ev_ok, ev_extra);
++#ifdef FABRIC_TEST_ICM
++    if (icm_cap[0] + icm_cap[1] + icm_cap[2]) {
++        printf("ICM responses: %lu captured, %lu matching\n", icm_cap[0],
++               icm_ok[0]);
++        printf("ICM device connected: %lu captured, %lu matching; "
++               "disconnected: %lu captured, %lu matching; %lu model "
++               "frames not in the capture\n", icm_cap[1], icm_ok[1],
++               icm_cap[2], icm_ok[2], icm_n + icm_extra);
++    }
++    if (getenv("AR_STRICT_ICM") &&
++        (icm_ok[0] != icm_cap[0] || icm_ok[1] != icm_cap[1] ||
++         icm_ok[2] != icm_cap[2])) {
++        printf("FAIL: ICM responses or events differ\n");
++        return 1;
++    }
++#endif
 +    if (dev_ev_cnt) {
 +        printf("device router hot plug events: %lu from the model, "
 +               "acknowledged%s\n", dev_ev_cnt,
@@ -43554,10 +42555,10 @@ index 0000000000000000000000000000000000000000..e51e0822f77d21e1b7267d49059d3869
 +}
 diff --git a/tests/usb4/adl-replay.py b/tests/usb4/adl-replay.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e9dd4fcd7
+index 0000000000000000000000000000000000000000..1b056dd059904ea0ceafde062b1a83da6c04e73c
 --- /dev/null
 +++ b/tests/usb4/adl-replay.py
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,286 @@
 +#!/usr/bin/env python3
 +# Extract the Linux software CM's conversation with the host router (route
 +# 0) and, optionally, device routers from a Framework 13 (12th gen)
@@ -43611,6 +42612,8 @@ index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e
 +
 +def records(path, last_record=False):
 +    for line in open(path):
++        # the task that sent it ("cat-11747 [007] ..." -> "cat")
++        comm = line.split('[', 1)[0].strip().rsplit('-', 1)[0]
 +        if last_record:
 +            starts = [m.start() for m in REC.finditer(line)]
 +            if not starts:
@@ -43622,6 +42625,7 @@ index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e
 +        f = dict(KV.findall(m.group(3)))
 +        f['t'] = float(m.group(1))
 +        f['k'] = m.group(2)
++        f['comm'] = comm
 +        try:
 +            if 'data' in f:
 +                f['data'] = [int(x, 16) for x in
@@ -43649,6 +42653,16 @@ index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e
 +            o['model'] = argv[i + 1]
 +        elif argv[i] == '--chain':
 +            o['chain'] = argv[i + 1]
++        elif argv[i] == '--exclude-comm':
++            # leave out the requests one task sent (P14s: "cat", the
++            # capture tool's debugfs register dumps)
++            o['exclude'] = argv[i + 1]
++        elif argv[i] == '--icm':
++            # Alpine Ridge firmware CM (run-ar-conformance.sh): also the
++            # ICM commands (C), responses (Q) and events (N)
++            o['icm'] = True
++            i += 1
++            continue
 +        else:
 +            raise SystemExit('unknown option ' + argv[i])
 +        i += 2
@@ -43690,6 +42704,14 @@ index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e
 +                        f['offset'] <= 4 < f['offset'] + f['len']):
 +                    pres = (f['data'][3 + 4 - f['offset']] >> 30) & 1
 +                    break
++            if o.get('icm'):
++                # Under the firmware CM the lane adapters have the tb3
++                # layout: the dock was there if the first ICM event is
++                # its device connected (code 3), and only on port 1.
++                ev = [f for f in rs if f.get('type') ==
++                      'TB_CFG_PKG_ICM_EVENT']
++                pres = int(port == 1 and bool(ev) and
++                           (ev[0]['data'][0] & 0xff) == 3)
 +            lines.append('P %d %d' % (port, pres))
 +        pending = []    # requests awaiting their answer, in order
 +        out_recs = []
@@ -43699,6 +42721,14 @@ index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e
 +
 +        for f in rs:
 +            k, ty = f['k'], f.get('type')
++            if o.get('icm') and ty in ('TB_CFG_PKG_ICM_CMD',
++                                       'TB_CFG_PKG_ICM_RESP',
++                                       'TB_CFG_PKG_ICM_EVENT'):
++                tag = {'TB_CFG_PKG_ICM_CMD': 'C', 'TB_CFG_PKG_ICM_RESP': 'Q',
++                       'TB_CFG_PKG_ICM_EVENT': 'N'}[ty]
++                out_recs.append(['%s %s %s' % (tag, ms(f), ' '.join(
++                    '%x' % x for x in f['data']))])
++                continue
 +            if k == 'tb_event':
 +                if f['route'] == 0:
 +                    out_recs.append(['E %s %d %d' % (ms(f), f['port'],
@@ -43714,6 +42744,9 @@ index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e
 +                    out_recs.append(['A %s %d %d' % (ms(f), (dw2 >> 8) & 0x3f,
 +                                     1 if (dw2 >> 30) == 3 else 0)])
 +                continue
++            if (k == 'tb_tx' and o.get('exclude') and
++                    f['comm'] == o['exclude']):
++                continue
 +            if k == 'tb_tx' and ty in ('TB_CFG_PKG_READ', 'TB_CFG_PKG_WRITE'):
 +                cs, adp = f['config'], f['port']
 +                if cs == 2:
@@ -43727,12 +42760,28 @@ index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e
 +                                           f['data'][3:3 + f['len']])
 +                rec = [head, None]
 +                out_recs.append(rec)
++                if o.get('icm'):
++                    # The firmware CM delays config requests and the
++                    # client retries them with the same 2-bit sequence
++                    # number: a new request retires an unanswered one with
++                    # its number (it timed out, X record).
++                    pending[:] = [(q, r) for q, r in pending
++                                  if not (q['route'] == f['route'] and
++                                          q.get('seq') == f.get('seq'))]
 +                pending.append((f, rec))
 +                continue
 +            if k != 'tb_rx':
 +                continue
-+            # Match the answer to the oldest pending request it fits.
-+            for i, (q, rec) in enumerate(pending):
++            # Match the answer to the oldest pending request it fits; with
++            # --icm by sequence number, and an error (which has none) to
++            # the newest request on its route, the one in flight.
++            order = list(enumerate(pending))
++            if o.get('icm') and ty == 'TB_CFG_PKG_ERROR':
++                order.reverse()
++            for i, (q, rec) in order:
++                if (o.get('icm') and ty != 'TB_CFG_PKG_ERROR' and
++                        q.get('seq') != f.get('seq')):
++                    continue
 +                if v2 and q['route'] != f['route']:
 +                    continue
 +                if ty == 'TB_CFG_PKG_ERROR':
@@ -43798,10 +42847,10 @@ index 0000000000000000000000000000000000000000..48253a8e59efc7ca6c6de980fdcb2c7e
 +    main()
 diff --git a/tests/usb4/fabric-test.c b/tests/usb4/fabric-test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e8fdb6484139800e77838d41a97ef6f13ae4ccd8
+index 0000000000000000000000000000000000000000..3f741b39b83131210986d6f98668cd8df6c16f77
 --- /dev/null
 +++ b/tests/usb4/fabric-test.c
-@@ -0,0 +1,2720 @@
+@@ -0,0 +1,2732 @@
 +/*
 + * Standalone test for the USB4 fabric: a minimal software connection
 + * manager driving usb4-ctl.c, usb4-fabric.c, usb4-router.c,
@@ -43868,25 +42917,31 @@ index 0000000000000000000000000000000000000000..e8fdb6484139800e77838d41a97ef6f1
 +    for (unsigned i = 0; i < f->ndw; i++) {
 +        f->dw[i] = usb4_get_be32(frame + 4 * i);
 +    }
-+    CHECK(f->dw[0] & 0x80000000u, "CM bit set in upstream packet");
++    /* ICM payloads (R5) carry no route string */
++    CHECK(pdf == USB4_PDF_ICM_EVENT || pdf == USB4_PDF_ICM_RESP ||
++          (f->dw[0] & 0x80000000u), "CM bit set in upstream packet");
 +    rx_tail++;
 +}
 +
++#ifndef FABRIC_TEST_ICM
 +/* The harness runs without the emulated ICM (f->icm stays NULL). */
 +void usb4_icm_hotplug(USB4ICM *icm, USB4Router *r, unsigned adapter,
 +                      bool unplug)
 +{
 +    CHECK(0, "ICM hot plug without an ICM");
 +}
++#endif
 +
 +void usb4_host_tx_resume(USB4Host *h)
 +{
 +}
 +
++#ifndef FABRIC_TEST_ICM
 +void usb4_icm_reset(USB4ICM *icm)
 +{
 +    CHECK(0, "ICM reset without an ICM");
 +}
++#endif
 +
 +USB4Fabric *usb4_host_get_fabric(USB4Host *h)
 +{
@@ -43927,14 +42982,20 @@ index 0000000000000000000000000000000000000000..e8fdb6484139800e77838d41a97ef6f1
 +    return d->ndfp;
 +}
 +
++/* Device names; a replay may give the captured ones */
++static const char *fake_vendor_name, *fake_model_name;
++
 +const char *usb4_device_vendor_name(USB4Device *d)
 +{
++    if (fake_vendor_name) {
++        return fake_vendor_name;
++    }
 +    return d->dialect == USB4_DIALECT_TB3 ? "QEMU Thunderbolt" : "QEMU";
 +}
 +
 +const char *usb4_device_model_name(USB4Device *d)
 +{
-+    return "USB4 NVMe Enclosure";
++    return fake_model_name ? fake_model_name : "USB4 NVMe Enclosure";
 +}
 +
 +void usb4_tunnel_port_set_state(USB4TunnelPort *p, USB4Device *dev,
@@ -47453,6 +46514,58 @@ index 0000000000000000000000000000000000000000..701d8c4434271d9f6a72fe582c214621
 +    "$top/hw/usb4/usb4-tunnel.c" "$top/hw/usb4/usb4-fabric-usb3.c" \
 +    $(pkg-config --libs glib-2.0) -o "$out/adl-conformance"
 +"$out/adl-conformance" "$out/adl-replay.txt"
+diff --git a/tests/usb4/run-ar-conformance.sh b/tests/usb4/run-ar-conformance.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f9bb17d40ca51592772062636c1b5810bbddea1
+--- /dev/null
++++ b/tests/usb4/run-ar-conformance.sh
+@@ -0,0 +1,46 @@
++#!/bin/sh
++# Conformance check of the tb3-alpine-ridge profile against the P14s Gen 1
++# (docs/ICM-PROTOCOL.md, R17-R21): replay the Linux ICM client's
++# conversation from the Assist off / pre-boot off capture
++# (tests/captures/p14s-gen1/linux-assistOFF_prebootOFF/*.tar.gz in the
++# outer repository, extracted, passed as $1 or in AR_CAPTURE) against the
++# fabric with the emulated firmware CM: its ICM commands (driver ready,
++# approve, ...), and every config read and write of the host router
++# (route 0) and the dock (route 1), the tb3 dialect checklist of
++# docs/ARCHITECTURE.md 4.2. Answers, ICM responses and ICM events are
++# compared with the captured ones; the device router's figures are
++# reported separately. ADL_VERBOSE / ADL_TOP as for
++# run-adl-conformance.sh; ADL_MIN_MATCH / ASM_MIN_MATCH thresholds as
++# there; AR_STRICT_ICM=1 fails on any ICM response or event difference.
++#   scripts/msys2-shell.sh ".../tests/usb4/run-ar-conformance.sh <dir>"
++# Copyright (c) 2026 usb4-emu contributors. SPDX-License-Identifier: GPL-2.0-only
++set -e
++here="$(cd "$(dirname "$0")" && pwd)"
++top="$here/../.."
++out="${OUT:-$here/build}"
++cap="${1:-$AR_CAPTURE}"
++[ $# -gt 0 ] && shift
++if [ -z "$cap" ]; then
++    echo "usage: $0 <extracted capture dir>" >&2
++    exit 2
++fi
++mkdir -p "$out/trace"
++python3 "$here/gen-trace-stub.py" "$top/hw/usb4/trace-events" \
++    "$out/trace/trace-hw_usb4.h"
++python3 "$here/adl-replay.py" "$cap" "$out/ar-replay.txt" --routes 0,1 \
++    --domains 0 --device-model ar --icm "$@"
++gcc -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter \
++    -Wno-sign-compare -Wno-missing-field-initializers -Wno-unused-function \
++    -DFABRIC_TEST_ICM \
++    -I"$here" -I"$here/stub" -I"$out" -I"$top/include" -I"$top" \
++    -I"$top/hw/usb4" $(pkg-config --cflags glib-2.0) \
++    "$here/adl-conformance.c" \
++    "$top/hw/usb4/usb4-ctl.c" "$top/hw/usb4/usb4-fabric.c" \
++    "$top/hw/usb4/usb4-router.c" "$top/hw/usb4/usb4-router-tb3.c" \
++    "$top/hw/usb4/usb4-router-adl.c" "$top/hw/usb4/usb4-router-asm.c" \
++    "$top/hw/usb4/usb4-router-img.c" "$top/hw/usb4/usb4-router-asm2464.c" \
++    "$top/hw/usb4/usb4-preos.c" "$top/hw/usb4/usb4-icm.c" \
++    "$top/hw/usb4/usb4-drom.c" \
++    "$top/hw/usb4/usb4-tunnel.c" "$top/hw/usb4/usb4-fabric-usb3.c" \
++    $(pkg-config --libs glib-2.0) -o "$out/ar-conformance"
++"$out/ar-conformance" "$out/ar-replay.txt"
 diff --git a/tests/usb4/run-asm2464-conformance.sh b/tests/usb4/run-asm2464-conformance.sh
 new file mode 100644
 index 0000000000000000000000000000000000000000..679094ea4de4c5952a06f3f164b61f2b9921180e
@@ -47581,6 +46694,48 @@ index 0000000000000000000000000000000000000000..38e8d5fcfb46f607096a5894ea8905f1
 +    do { (void)(errp); fprintf(stderr, "error: " __VA_ARGS__); \
 +         fputc('\n', stderr); } while (0)
 +#endif
+diff --git a/tests/usb4/stub/qemu/bswap.h b/tests/usb4/stub/qemu/bswap.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7dc30272a965e99c8afd6a095ffc79d7da91c642
+--- /dev/null
++++ b/tests/usb4/stub/qemu/bswap.h
+@@ -0,0 +1,36 @@
++/* Minimal byte access helpers for the standalone fabric test (usb4-icm.c).
++ * Copyright (c) 2026 usb4-emu contributors. SPDX-License-Identifier: GPL-2.0-only */
++#ifndef USB4_TEST_BSWAP_H
++#define USB4_TEST_BSWAP_H
++static inline uint32_t ldl_be_p(const void *ptr)
++{
++    const uint8_t *p = ptr;
++
++    return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
++}
++
++static inline uint32_t ldl_le_p(const void *ptr)
++{
++    const uint8_t *p = ptr;
++
++    return (uint32_t)p[3] << 24 | p[2] << 16 | p[1] << 8 | p[0];
++}
++
++static inline void stl_le_p(void *ptr, uint32_t v)
++{
++    uint8_t *p = ptr;
++
++    p[0] = v;
++    p[1] = v >> 8;
++    p[2] = v >> 16;
++    p[3] = v >> 24;
++}
++
++static inline void stw_le_p(void *ptr, uint16_t v)
++{
++    uint8_t *p = ptr;
++
++    p[0] = v;
++    p[1] = v >> 8;
++}
++#endif
 diff --git a/tests/usb4/stub/qemu/osdep.h b/tests/usb4/stub/qemu/osdep.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..ef3fd0818e40b17684682b87e50507fb4493591c
@@ -47614,10 +46769,10 @@ index 0000000000000000000000000000000000000000..ef3fd0818e40b17684682b87e50507fb
 +#endif
 diff --git a/tests/usb4/stub/qemu/uuid.h b/tests/usb4/stub/qemu/uuid.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5775393e8c280db9185e1fd79474430a1fa143c6
+index 0000000000000000000000000000000000000000..4b726882b6203911eaf91ed7dd4ae9ac999f3b5c
 --- /dev/null
 +++ b/tests/usb4/stub/qemu/uuid.h
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,33 @@
 +/* Minimal QemuUUID for the standalone fabric test.
 + * Copyright (c) 2026 usb4-emu contributors. SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef USB4_TEST_UUID_H
@@ -47627,4 +46782,27 @@ index 0000000000000000000000000000000000000000..5775393e8c280db9185e1fd79474430a
 +        unsigned char data[16];
 +    };
 +} QemuUUID;
++
++/* The canonical 36-character form only (usb4-icm.c boot-acl) */
++static inline int qemu_uuid_parse(const char *str, QemuUUID *uuid)
++{
++    unsigned k = 0;
++
++    for (unsigned i = 0; str[i] && k < 32; i++) {
++        char c = str[i];
++        int v = c >= '0' && c <= '9' ? c - '0' :
++                c >= 'a' && c <= 'f' ? c - 'a' + 10 :
++                c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
++
++        if (c == '-' && (i == 8 || i == 13 || i == 18 || i == 23)) {
++            continue;
++        }
++        if (v < 0) {
++            return -1;
++        }
++        uuid->data[k / 2] = (k & 1) ? (uuid->data[k / 2] | v) : v << 4;
++        k++;
++    }
++    return k == 32 && strlen(str) == 36 ? 0 : -1;
++}
 +#endif

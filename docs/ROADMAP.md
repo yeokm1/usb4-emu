@@ -52,8 +52,22 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   `Windows11_Client_x64_en-us_26300_9457.iso`; Intel package and Linux image open)
   guest kernel and image, Windows 11 image. Candidate Intel package: the one on the real
   P14s, `tbthostcontroller.inf` 1.41.1353.0 (12/12/2022), per the Windows 11 capture.
-- [ ] Create `NOTICE` with the FreeBSD and tbtools notices, ready for the first incorporated
+  Pinned 2026-10-22 from what is at hand: QEMU upstream v11.1.2 plus the fork at `9b5db6e`
+  (`src/patches/0001-usb4-emu.patch`); Windows 11 ISO sha256
+  `bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650`; Linux guest
+  Kubuntu 26.04.1 desktop amd64 live ISO (`kubuntu-26.04.1-desktop-amd64.iso`, sha256
+  `831e4d4bb85098339ba43d3502cd6619b27e76daf37246a084cd68a6413090b8`), kernel
+  7.0.0-30, booted with `-kernel`/`-initrd` from the ISO as in `docs/LINUX-TEST.md`.
+  Open, needs the maintainer: the Intel package. 1.41.1353.0 is not on this machine. A
+  Windows Update Catalog DCH package 1.41.1379.0 (07/27/2023, `TbtHostController.inf`,
+  matches `PCI\VEN_8086&DEV_15BF&CC_0880`; cab sha256
+  `d01be65779f2e26ea6c07e4db2f4e0b8bb3a99d5f64aabada8828ac0969eb1c6`) is; 1.41.1423.0
+  from the same source no longer lists `DEV_15BF`. The choice between the captured
+  version and 1379.0 is the maintainer's.
+- [x] Create `NOTICE` with the FreeBSD and tbtools notices, ready for the first incorporated
   file.
+  Done 2026-10-22: the pinned commits, the copyright lines and licence texts of both,
+  and the Linux entry, each with an empty file list (nothing is incorporated yet).
 - [x] Write the clean-room description of the Intel host interface MMIO semantics that M1
   implements (interrupt clearing, DMA misc auto-clear bit, mailbox) with observed and
   inferred tags, as the first part of `docs/ICM-PROTOCOL.md`.
@@ -101,10 +115,21 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   mode and commands (R3), driver-ready response with the advertised values from
   `ARCHITECTURE.md` §4.2b (R8).
   Done 2026-10-14 (QEMU `usb4-icm` 64154b6; `tb3-titan-ridge` kept as a deprecated alias).
-- [ ] `tb3` dialect host router at route 0 and `tb3` dialect device router, serving the full
+- [x] `tb3` dialect host router at route 0 and `tb3` dialect device router, serving the full
   read checklist in `ARCHITECTURE.md` §4.2: headers, adapter capability chains, link
   controller fuse UUID, EEPROM bit-bang DROM on the device, UID-only on the host, and no
   NHI-typed adapter at 3, 5 or 7 so the DMA-port probe fails (R17-R19, R21).
+  Done 2026-10-22: `tests/usb4/run-ar-conformance.sh` (QEMU `9b5db6e`) replays the P14s
+  Linux trace against the fabric with the emulated firmware CM, details in
+  `ICM-PROTOCOL.md` §5.6. With the client's own traffic (`--exclude-comm cat`): every
+  read of both routers answered, all 15 ICM responses and all 4 device events as
+  captured; dock 2,265 of 2,514 read dwords as captured (90.1%), host 199 of 294
+  (67.7%), writes 4,172 of 4,181. The differences are the DROM and host UID contents
+  (emulator identity), the DMA port (deliberately absent, R20), two counter dwords and
+  the Adapter Num of Router CS write replies (owed, §5.6). The replay found and fixed
+  the EEPROM control dword read-back while bit-banging (§5.4). Also: qtests
+  `usb4-icm-test`, `usb4-tb3dev-test` and the fabric harness `test_tb3_*`; the M2 Linux
+  exit.
 - [x] Device-connected and device-disconnected events and get route with the lifecycle
   rules, including announcing boot-present devices after driver-ready and after
   driver-unloads plus driver-ready (R9, R11-R13).
@@ -114,9 +139,14 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   commands per the support matrix return the ICM error flag (R10, R14-R16).
   Done 2026-10-14 without a stub: approve programs the PCIe paths and Path Enable through
   the fabric config API, so the shared evaluator brings the tunnel up (R22).
-- [ ] NHI class code `0x088000` (R23, needed by the Windows INF) and, on q35, an optional
+- [x] NHI class code `0x088000` (R23, needed by the Windows INF) and, on q35, an optional
   Device Serial Number capability (R29).
-  Class code done 2026-10-14 (R1); the Device Serial Number capability is open.
+  Class code done 2026-10-14 (R1). Device Serial Number done 2026-10-22 (QEMU `9b5db6e`):
+  the NHI's first extended capability on q35, `usb4-host` `dsn` (default on for the tb3
+  profiles) and `dsn-value` (default derived from `uuid`); the switch port types
+  `usb4-tb3-*`/`usb4-tr-*` (usp, dsp, tunnel-dsp) take the same `dsn-value`, as the
+  captured functions all report one serial; `scripts/run-linux.sh DSN=`. qtest
+  `usb4-icm-test` `/usb4-icm/dsn`. The tunnelled dock's own switch DSN is not modelled.
 - [x] Exit: unmodified Linux binds with MSI, reports the firmware CM, lists the device under
   `/sys/bus/thunderbolt/devices` with the captured name, vendor and UUID, and no NVM
   attributes. Boot-present, hot-added, `device_del` plus re-`device_add`, and driver
@@ -162,9 +192,25 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   (SeaBIOS / Windows 98 DOS mode) seeing the NVMe behind the tunnel, and by Linux
   reporting `boot` = 1. This is the zero-driver path for legacy guests the captures show
   (Windows 98 `OFF_ON`, `ON_ON`).
-- [ ] Before the Windows smoke gate: MSI-X with 16 vectors and the auto-clear bit (R7,
+  Done (recorded 2026-10-22; built 2026-10-14 to -16): `preboot=on`, `boot-acl=`,
+  `preboot-acl-only` (R25, R26; since 2026-10-15 every attached device is approved, as
+  the ORICO capture shows, `ICM-PROTOCOL.md` §13.2). Driverless guest: SeaBIOS maps the
+  NVMe behind the pre-boot tunnel as INT 13h drive 0x81 and DOS / Windows 98 use it as
+  D: with `BIOS=OFF_ON` (`NVME-DRIVER-EVAL.md`, `WIN98-TEST.md` "SMM hang at the boot
+  logo" table and "P14s BIOS matrix"). Linux `boot` 1: `BIOS=ON_ON` with the dock
+  (`WIN98-TEST.md`, Linux paragraph), the ORICO cells of `ICM-PROTOCOL.md` §13.7 and
+  Titan Ridge (`LINUX-TEST.md`). qtests `usb4-icm-test` `/usb4-icm/preboot`,
+  `preboot-order`, `preboot-reset`, `usb4-icm-tr-test` `/usb4-icm-tr/preboot`.
+- [x] Before the Windows smoke gate: MSI-X with 16 vectors and the auto-clear bit (R7,
   R24). Windows 11 logs the host and device NVM versions, which on Alpine Ridge come only
   from the DMA port, so expect to need the read-only DMA port (R20) for it.
+  Done (MSI-X and auto-clear since 2026-10-14; checked 2026-10-22, QEMU `9b5db6e`): the
+  captured layout (capability 0xa0, 16 entries, table at BAR1 + 0, PBA at BAR1 + 0xfa0,
+  BAR1 4 KiB), each of the 16 vectors reachable through the vector allocation registers
+  with auto-clear on delivery and on unmasking, two causes on two vectors at once:
+  qtests `/usb4-icm/msix-vectors`, `/usb4-icm/msix-autoclear`, and the
+  `usb4-host-test` M1 matrix. The read-only DMA port on the `tb3-*` profiles stays open
+  until the smoke gate shows Windows needs it.
 - [ ] Windows AR smoke gate: Windows 11 with the pinned Intel Thunderbolt driver package
   (captured: `tbthostcontroller.inf` 1.41.1353.0).
 - [ ] Optional, unscheduled: "nothing attached means powered down" model and ACPI force

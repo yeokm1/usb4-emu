@@ -558,6 +558,14 @@ Control dword bits: 0 clock, 1 chip select (0 = selected), 2 data to EEPROM, 3 d
 EEPROM, 4 bit-bang enable, 5 not-present, 7 present; bits 31:8 preserved by the client
 [inf]. Idle values: host `0x0002018a`, dock `0x0002218e` [obs] `T:103`, `T:925`.
 
+While bit-bang enable is set the dword reads only bits 4:0, bits 31:5 read 0 (the dock
+reads `0x0002218e`, the client writes `0x0002219e` and `0x0002219c`, then reads `0x14`
+and from then on writes `0x10`, `0x11`, ...); the data-from-EEPROM bit reads 0 while the
+command and address are clocked in; after the disable writes (`0x12`, `0x02`) the idle
+value is back (`0x0002218a`) [obs] trace, both routers, found by the replay of §5.6
+(2026-10-22). The same was observed on the dock under the Framework's software CM. The
+model has done this since 2026-10-22 on every tb3 router.
+
 Before each transfer the client reads 13 dwords from the plug-events capability, needs
 present = 1 and not-present = 0, and takes the DROM offset from dword +12 [inf]; observed
 re-read before every transfer [obs] `T:129`, `T:1189`.
@@ -604,6 +612,40 @@ read [obs] `T:15`-`T:831`. No link, TMU, CL-state, path or hop-table access happ
 the firmware CM [obs]: no writes other than §5 and no reads of config space 0 (path) by
 the client; path-space reads in the trace come only from the capture tool's debugfs
 dumps.
+
+### 5.6 Conformance replay (2026-10-22)
+
+`tests/usb4/run-ar-conformance.sh <extracted linux-assistOFF_prebootOFF capture>` builds
+the fabric, the tb3 routers and the emulated ICM (`usb4-icm.c`) as a host program and
+replays the trace in time order: the client's ICM commands (approve rewritten to the
+model's UUID, key and connection id, a driver-unloads mailbox before each later driver
+ready), every config read and write of route 0 and route 1, and the dock's plug and
+unplug at the captured events; the dock starts approved, as at `T:9`. Answers are
+matched to requests by sequence number. It compares read data, errors, write outcomes,
+reply headers, ICM responses and device events. `--exclude-comm cat` leaves out the
+capture tool's debugfs register dumps (27,776 of the 34,467 requests). Results with QEMU
+`9b5db6e`:
+
+| | Client only | With the debugfs dumps |
+|---|---|---|
+| ICM responses / device connected / disconnected | 15/15, 3/3, 1/1 | same |
+| Host router read dwords | 199 of 294 | 23,179 of 75,165 |
+| Dock read dwords | 2,265 of 2,514 | 16,630 of 47,928 |
+| Writes with the captured outcome | 4,172 of 4,181 | same |
+| Reply headers | 2,460 of 6,632 | 7,333 of 11,505 |
+
+What differs, client only: the data bit of the EEPROM reads (the DROM and the host UID
+are the emulator's, not the captured bytes; the dock's 216 reads and the host's 45); the
+DMA port (adapter 3 / 5 typed NHI and its mailbox reads and writes, deliberately
+absent, R18, R20); router dwords 6 and 0x64 (they change on their own on the hardware, unmodelled);
+and every Router CS write reply: the hardware answers a write with Adapter Num 0 and
+only reads with the upstream adapter (`0x0400202c` against the model's `0x0418202c` /
+`0x0408202c`), as the captured software-CM routers do. The model applies that rule to
+`img` and software-CM routers only (`usb4-fabric.c`); extending it to tb3 routers under
+the firmware CM is owed (2026-10-22: left alone because another branch was changing that
+file). The debugfs dumps also read vendor-specific router dwords from 0x400 to 0xfff
+and a longer link-controller chain (dword 0x100 `0x02140400`), which the model answers
+with error 2 or ends early under the firmware CM; no CM reads them.
 
 ## 6. Sequences, as observed
 
@@ -848,6 +890,12 @@ Added after the Windows 11, Windows 98 and Assist-on captures (§10-§12):
 - **R29** Optional PCIe Device Serial Number capability on the NHI and switch functions
   (q35 only): Windows builds its device instance IDs from it (§10.1), so a stable value
   keeps Windows device identity, and the stored per-device approval, stable across boots.
+  Captured: the first extended capability (0x100) of the NHI and of all four switch
+  ports, one value for all of them [obs] Linux `lspci -xxxx` of 03:00.0-05:00.0; the
+  value shares bytes 7:3 with bytes 5:1 of the host router UID (§5.4) on the one unit
+  seen [obs], so it is probably derived from it [inf]. Implemented 2026-10-22: `usb4-host`
+  `dsn` / `dsn-value` (default derived from `uuid`), the switch port types' `dsn-value`
+  (at 0x200, behind QEMU's AER; default none).
 - **R30** BIOS Assist (`bios-assist=on`): ACPI-owned hot-plug (q35 `PCI0._OSC` grants
   only LTR and DPC, §11.3), the integrated xHCI `8086:15c1` hidden (its downstream port
   stays), and power-down when empty (R27). With the host's `xhci=<id>` property the

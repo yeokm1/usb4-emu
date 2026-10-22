@@ -122,6 +122,11 @@ HOST="id=u4,tunnel-port=tp0,profile=$PROFILE${HOST_OPTS:-}"
 [ "$ASM" = 1 ] && HOST="id=u4,tunnel-port=tp0,tunnel-port2=tp1,profile=usb4-generic,host-model=asm4242${HOST_OPTS:-}"
 SW=usb4-tb3
 [ "$TR" = 1 ] && SW=usb4-tr
+# DSN=<64-bit value>: the PCIe Device Serial Number of the NHI and, with
+# TOPOLOGY=switch, of every switch port (ICM-PROTOCOL.md R29; q35, tb3
+# profiles). Unset: the NHI's is derived from its uuid, the ports have none.
+DSNP=${DSN:+,dsn-value=$DSN}
+case "$PROFILE" in tb3-*) HOST="$HOST$DSNP" ;; esac
 if [ "$ASM" = 1 ] && [ "${TOPOLOGY:-switch}" = switch ]; then
     TB=(-device "pcie-root-port,id=asmrp,bus=pcie.0,addr=3.0,chassis=1,slot=1,bus-reserve=${ASM_BUS_RESERVE:-100},mem-reserve=${ASM_MEM_RESERVE:-64M}"
         -device "usb4-asm-usp,id=asmusp,bus=asmrp"
@@ -140,11 +145,11 @@ elif [ "${TOPOLOGY:-bridge}" = switch ]; then
     # The root port is a gated usb4-tunnel-port: the power domain that
     # BIOS Assist turns off when nothing is attached (R27).
     TB=(-device "usb4-tunnel-port,id=tbrp,bus=pcie.0,addr=1c.0,chassis=1,slot=1,usb4-dvsec=off"
-        -device "$SW-usp,id=tbusp,bus=tbrp"
-        -device "$SW-dsp,id=tbd0,bus=tbusp,addr=0.0,chassis=2,slot=0"
-        -device "$SW-tunnel-dsp,id=tp0,bus=tbusp,addr=1.0,chassis=3,slot=1"
-        -device "$SW-dsp,id=tbd2,bus=tbusp,addr=2.0,chassis=4,slot=2")
-    [ "$TR" = 1 ] && TB+=(-device "$SW-tunnel-dsp,id=tp1,bus=tbusp,addr=4.0,chassis=5,slot=4")
+        -device "$SW-usp,id=tbusp,bus=tbrp$DSNP"
+        -device "$SW-dsp,id=tbd0,bus=tbusp,addr=0.0,chassis=2,slot=0$DSNP"
+        -device "$SW-tunnel-dsp,id=tp0,bus=tbusp,addr=1.0,chassis=3,slot=1$DSNP"
+        -device "$SW-dsp,id=tbd2,bus=tbusp,addr=2.0,chassis=4,slot=2$DSNP")
+    [ "$TR" = 1 ] && TB+=(-device "$SW-tunnel-dsp,id=tp1,bus=tbusp,addr=4.0,chassis=5,slot=4$DSNP")
     TB+=(-device "usb4-host,bus=tbd0,addr=0.0,$HOST")
     [ "${XHCI:-1}" = 1 ] && TB+=(-device "$SW-xhci,id=tbxhci,bus=tbd2,addr=0.0")
 else
