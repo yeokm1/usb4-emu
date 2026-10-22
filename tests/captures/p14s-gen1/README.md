@@ -179,3 +179,14 @@ undamaged copies of the same kernel log, then the fixed `scrub.py` scrubbed the 
 USB serial, root and resume filesystem UUIDs or host name found in the unredacted copy
 remains; DMI serials and the system UUID had been redacted on the machine. The
 unredacted archive is not in the repository.
+
+## linux-orico-suspend-s3-assistOFF_prebootOFF (2026-10-23, 07:28)
+
+Archive `p14s-linux-20261023-072801-orico-suspend-s3` and its `.sha256`, as received
+(the on-machine redaction, with the fixed `redact.py`, completed; a host `scrub.py` dry
+run changes nothing; checked for the raw MAC addresses, USB serial, filesystem UUIDs and
+host name of the earlier run: none present). Same machine and BIOS cell as the 00:01 run
+(pre-boot off: the ORICO was a USB disk from boot), updated script, options as before
+plus `suspend-deep=1`: one s2idle and one S3 (`rtcwake -m mem`). The replug again
+missed the approve window, so neither suspend had a tunnel. Analysis:
+[`docs/captures/P14S-SUSPEND-2026-10-23.md`](../../../docs/captures/P14S-SUSPEND-2026-10-23.md) §9.

@@ -1253,6 +1253,11 @@ across s2idle and S3 remains uncaptured.
   and several router vendor dwords were cleared: the Thunderbolt side came back in a
   reset state while the controller's xHCI kept its USB device without a reset [obs;
   the mechanism is inf].
+- S3 (second run, 07:28, also without a tunnel): the controller lost power (xHCI "root
+  hub lost power"), the outbound mailbox read its power-on `0x800003f0` again, the
+  firmware CM answered the post-resume driver ready with the same words, and the boot
+  ACL kept its entries [obs].
 - Model: unchanged (the s2idle path is the runtime-suspend path plus 0x05, all already
-  modelled; the router reset is invisible with nothing attached). Next: the same run with
-  a tunnel (pre-boot on), under s2idle and under S3 (`capture-linux.sh --suspend-deep`).
+  modelled; the router reset is invisible with nothing attached; QEMU's S3 wakeup reset
+  already restores `0x800003f0` and keeps the ACL). Next: the same runs with a tunnel
+  (pre-boot on), captures/P14S-SUSPEND-2026-10-23.md §9.
