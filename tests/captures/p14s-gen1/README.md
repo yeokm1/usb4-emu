@@ -190,3 +190,13 @@ host name of the earlier run: none present). Same machine and BIOS cell as the 0
 plus `suspend-deep=1`: one s2idle and one S3 (`rtcwake -m mem`). The replug again
 missed the approve window, so neither suspend had a tunnel. Analysis:
 [`docs/captures/P14S-SUSPEND-2026-10-23.md`](../../../docs/captures/P14S-SUSPEND-2026-10-23.md) §9.
+
+## linux-orico-suspend-s3-assistOFF_prebootON (2026-10-23, 07:45)
+
+Archive `p14s-linux-20261023-074520-orico-suspend-s3` and its `.sha256`, as received
+(on-machine redaction completed; host `scrub.py` dry run changes nothing). BIOS pre-boot
+support **on**, Assist off; ORICO attached at power-on (tunnel and NVMe at boot) and
+enrolled in boltd; unplug, replug (approved by boltd), then one s2idle and one S3 with
+the tunnel up. **The tunnel and the NVMe survived both**, and the firmware re-announced
+the ORICO approved after each resume. Analysis:
+[`docs/captures/P14S-SUSPEND-2026-10-23.md`](../../../docs/captures/P14S-SUSPEND-2026-10-23.md) §10.
