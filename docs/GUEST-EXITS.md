@@ -138,6 +138,91 @@ Not run on Windows 11:
   component: Graphics" (the basic display adapter on `-vga std`), no S0 low power idle,
   hibernation off. A display device with a sleep-capable driver would be needed first.
 
+## M3: Linux `tb3-alpine-ridge`, `security=user`, and the legacy SHPC path (2026-10-22)
+
+QEMU `9b5db6e` (`E:\usb4-emu-wt\bin-9b5db6e`), TCG 4 vCPUs, Kubuntu 26.04.1 live
+(kernel 7.0.0-30) booted with `-kernel`/`-initrd`, one guest at a time, kit
+`E:\usb4-emu-vm\emu-open` (`launch.sh`: `MACHINE=q35|pc`, ports 49020/49021). Five
+boots: q35 `security=user` (a1), q35 `security=none` (b1), i440FX `security=user` with
+`shpc-autoenable` off (c1) and on (d1), i440FX `security=none` (e1). Data check each
+time: 16 MiB O_DIRECT read of the NVMe, md5 `2f58ad9a...` as written at the start.
+
+q35, `usb4-tunnel-port`, `security=user`:
+
+- Boot: firmware CM, security user, `0-1` `authorized` 0, no NVMe in `lspci`.
+  `authorized=1`: NVMe at 01:00.0, 16 MiB written and read back O_DIRECT, same md5.
+- `x-cable=false` (idle): pciehp link down, card not present, "0-1: device
+  disconnected", no NVMe, no router. `x-cable=true`: `0-1` back with `authorized` 0 and
+  no NVMe; `authorized=1` brings it back with the same data.
+- Force teardown with the deferred stages held (`x-hold-deferred=on`, `tunnel=down`):
+  `endpoint` "doomed gen=2 gate=closed"; from the guest, BAR0 through
+  `resource0` reads `ffffffff` (was `0f0107ff`), config dword 0 `ffffffff`, a Command
+  write reads back `ffff`, a 4 KiB O_DIRECT read never completes (`timeout` 15 s).
+  Released: the endpoint is removed, nvme logs the dead controller, nothing in D state.
+- In-flight read at teardown: drive throttled to 64 KiB/s read, a 1 MiB O_DIRECT read
+  into a page-cache-free buffer file in `/dev/shm` started, `tunnel=surprise` 3 s later:
+  `dd` fails (rc 1), the buffer is unchanged (md5 of the fill pattern), no nvme
+  interrupt after the teardown.
+- Eject the guest ignores (pcieport unbound from 00:05.0, so pciehp never answers):
+  `tunnel=eject` gives "ejecting", the endpoint is removed at the 10 s timeout and the
+  slot waits for an acknowledgement ("awaiting-ack").
+- Reconnect before an ignored eject completes (pciehp unbound, `tunnel=eject` then at
+  once `tunnel=up`): the pending endpoint is removed at once, one fresh endpoint (gen
+  10) is inserted at the settle timeout, and it is still there after the old eject's
+  10 s timeout.
+- Replacement after a guest power-off: after `tunnel=surprise` pciehp powers the slot
+  off; on `tunnel=up` the replacement comes with an attention-button event, pciehp
+  powers the slot on ("Button press: will power on in 5 sec") and the NVMe serves the
+  same data.
+- `security=none` (b1): `0-1` `authorized` 1 and the NVMe at boot; `device_del` and
+  `device_add` of the router: back without any `authorized` write, same data.
+- Idle afterwards: 10 s deltas 0 on every thunderbolt, nvme and pciehp vector, no
+  warnings, nothing in D state.
+
+Finding (owner question): the model treats a guest power-off of the slot while an
+endpoint is present as the guest ejecting it: it removes the endpoint and keeps the
+slot empty ("dismissed") until the tunnel goes down and up again, so the guest cannot
+power it on again (`echo 1 > .../slots/1/power`: "No such device"; pciehp then reads
+the card as not present). Linux does such a power-off in two places: when pciehp is
+rebound on a slot whose power control reads off, and when a reconnect comes inside
+pciehp's 5 s attention-button window of an eject of the old endpoint (`tunnel=eject`,
+then `tunnel=up` at once with pciehp bound): the old eject's power-off lands on the new
+endpoint (gen 8) and removes it. Real hardware would keep the card present and powered
+off. The exit's "one fresh endpoint" holds with an ignoring guest, not with this Linux
+timing. Changing it is in `usb4-tunnel-slot.c`, which the link-retrain branch is
+changing; not touched here.
+
+i440FX, `usb4-tunnel-bridge` (no SHPC driver: Linux's shpchp cannot get control
+without ACPI OSHP, "Cannot get control of SHPC hotplug", so this guest never touches
+SHPC unless told to; the Thunderbolt driver approves, as a ring-level client would):
+
+- `shpc-autoenable` off (c1): after `authorized=1` the endpoint is live but gated
+  ("live gen=1 gate=closed"), slot state Disabled (`0x3f`); a PCI rescan finds nothing.
+  Polled SHPC writes through the config DWORD window (capability 0x40): Power-only
+  (command `0x0101`) leaves it gated, rescan finds nothing, config reads fail; Enabled
+  with the power LED on (`0x0106`) opens the gate: rescan finds 01:01.0, same data,
+  nvme interrupts delivered.
+- Removal with this guest: `x-cable=false`, config reads `ffffffff`, a read times out,
+  no D state; the guest removes the PCI device; `x-cable=true`, `authorized=1`: the
+  replacement comes at the settle timeout (no acknowledgement from this guest), the
+  slot is still Enabled (guest state persisted), a rescan reaches it, same data.
+- `shpc-autoenable=on` (d1): `authorized=1`, the slot enables itself (state Enabled),
+  a rescan reaches the NVMe, same data.
+- Same, reconnect with the guest claiming the empty slot: guest removes the PCI device,
+  `x-cable=false`, guest commands Disabled with power LED off and attention LED blink
+  (`0x012f`) and clears the presence latch (the acknowledgement); `x-cable=true`,
+  `authorized=1`: the replacement is inserted (gen 2) but stays gated ("gate=closed"),
+  a rescan finds nothing, slot register still `...2f` (state and both LEDs as the guest
+  set them); the guest enables the slot (`0x0106`): reachable, same data.
+- Separate run, no acknowledgement (guest commands Disabled, power LED off, attention
+  LED on, `0x011f`, and leaves the latch set): the replacement (gen 3) is inserted at the
+  settle timeout, stays gated with the slot register unchanged (`...1f`), and becomes
+  reachable when the guest enables the slot.
+- `security=none` (e1): `0-1` authorised at boot, the NVMe reached after a rescan;
+  `device_del`/`device_add` of the router: authorised again without a write, reached
+  after a rescan, same data.
+- Idle: deltas 0 on every thunderbolt and nvme vector, no warnings, no D state.
+
 ## S3 and the PCIe tunnel (finding, not part of the exits; resolved by the link retrain)
 
 On `usb4-generic` the NVMe does not survive S3, though the USB disk does. On resume

@@ -58,12 +58,16 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   Kubuntu 26.04.1 desktop amd64 live ISO (`kubuntu-26.04.1-desktop-amd64.iso`, sha256
   `831e4d4bb85098339ba43d3502cd6619b27e76daf37246a084cd68a6413090b8`), kernel
   7.0.0-30, booted with `-kernel`/`-initrd` from the ISO as in `docs/LINUX-TEST.md`.
-  Open, needs the maintainer: the Intel package. 1.41.1353.0 is not on this machine. A
-  Windows Update Catalog DCH package 1.41.1379.0 (07/27/2023, `TbtHostController.inf`,
-  matches `PCI\VEN_8086&DEV_15BF&CC_0880`; cab sha256
-  `d01be65779f2e26ea6c07e4db2f4e0b8bb3a99d5f64aabada8828ac0969eb1c6`) is; 1.41.1423.0
-  from the same source no longer lists `DEV_15BF`. The choice between the captured
-  version and 1379.0 is the maintainer's.
+  Intel package, pinned 2026-10-22 by the maintainer: the Windows Update Catalog DCH
+  package 1.41.1379.0 (07/27/2023, `TbtHostController.inf`, matches
+  `PCI\VEN_8086&DEV_15BF&CC_0880`; cab
+  `12081e68-169e-483b-9180-87f40ecc6904_8aa1088bc7bd88105d5c4e4a504bfb9bdcd01078.cab`,
+  sha256 `d01be65779f2e26ea6c07e4db2f4e0b8bb3a99d5f64aabada8828ac0969eb1c6`; local copy
+  `E:\xhci98-scratch\p43-33\dl\tbt-dch-1.41.1379.0`). The P14s capture ran 1.41.1353.0
+  (12/12/2022), which is not available here; 1.41.1423.0 from the same source no longer
+  lists `DEV_15BF`. Windows guest drivers for the S3 leg: virtio-win 0.1.302 stable
+  (`virtio-win-0.1.302.iso` from fedorapeople.org `stable-virtio`, sha256
+  `303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d`), used only inside guests.
 - [x] Create `NOTICE` with the FreeBSD and tbtools notices, ready for the first incorporated
   file.
   Done 2026-10-22: the pinned commits, the copyright lines and licence texts of both,
@@ -212,7 +216,7 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   `usb4-host-test` M1 matrix. The read-only DMA port on the `tb3-*` profiles stays open
   until the smoke gate shows Windows needs it.
 - [ ] Windows AR smoke gate: Windows 11 with the pinned Intel Thunderbolt driver package
-  (captured: `tbthostcontroller.inf` 1.41.1353.0).
+  (pinned: 1.41.1379.0, M0; the capture ran `tbthostcontroller.inf` 1.41.1353.0).
 - [ ] Optional, unscheduled: "nothing attached means powered down" model and ACPI force
   power (R27, R28), for testing a driver's force-power path.
 - [ ] Exit, Linux, `security=user`: writing `1` to `authorized` exposes `/dev/nvme0n1` and
@@ -238,14 +242,37 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   the NHI, reaches driver-ready, and shows the attached device; full Windows validation
   stays in M5. If the Intel package rejects the simplified PCI topology, record what it
   needs and decide whether to model the controller's PCIe switch before M4.
+  Linux runs 2026-10-22 ([GUEST-EXITS.md](GUEST-EXITS.md) "M3", QEMU `9b5db6e`, TCG):
+  - [x] q35: `authorized=1` exposes the NVMe with I/O, unapproved never; idle removal
+    and reconnect with re-approval; force teardown with the bottom half held blocks
+    MMIO, config writes and I/O; a throttled read in flight fails and leaves the buffer
+    unchanged; an ignored eject is removed at the timeout; a reconnect during an ignored
+    eject gives one fresh endpoint that outlives the old timeout; the replacement after
+    the guest's power-off comes unpowered and serves I/O once pciehp powers the slot on;
+    no acknowledgement: inserted at the settle timeout. `security=none` on q35 and
+    i440FX, boot-present and hot-added.
+  - [x] i440FX: gated in Disabled and Power-only, reachable after the guest enables the
+    slot by SHPC writes; removal and replacement with this driverless guest.
+  - [ ] Open, owner question: with Linux's pciehp the model treats the guest's slot
+    power-off of a present endpoint as an eject and dismisses it, so a reconnect inside
+    pciehp's 5 s attention-button window of the old eject loses the new endpoint until
+    the next tunnel cycle, and a pciehp rebind on a slot reading powered off removes it
+    (`usb4-tunnel-slot.c`, left for after link-retrain).
+  - DMA and MSI blocked by the gate address space rather than the Command register stay
+    qtest-verified (`usb4-tunnel-test`); the guest only shows that I/O stops.
+  - [ ] Windows: owed (the Intel package, now pinned).
 
-- [ ] Exit, legacy path on `usb4-tunnel-bridge`: with `shpc-autoenable=on` and a guest that
+- [x] Exit, legacy path on `usb4-tunnel-bridge`: with `shpc-autoenable=on` and a guest that
   never touches SHPC (a ring-level test driver plus a PCI config rescan), approve makes
   the NVMe endpoint reachable. With it off, the same test enables the slot by polled SHPC
   register writes and then reaches the endpoint. With it on, a guest that disables the
   empty slot during a reconnect claims the slot: the replacement, inserted after
   acknowledgement and, in a separate run, after the settle timeout, stays inaccessible
   until the guest enables the slot, and the indicators the guest set are unchanged.
+  Met 2026-10-22 (QEMU `9b5db6e`): Kubuntu 26.04.1 on i440FX, whose shpchp cannot take
+  SHPC control (no OSHP), the Thunderbolt driver approving and `/sys/bus/pci/rescan`;
+  SHPC commands by `setpci` through the config DWORD window. All five cases as worded;
+  readings in [GUEST-EXITS.md](GUEST-EXITS.md) "M3".
 
 At this point the xhci98 project has what it needs to start the legacy Windows ICM client.
 It should run the tunnel bridge with `shpc-autoenable=on` unless it implements SHPC
