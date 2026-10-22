@@ -1,6 +1,7 @@
 usb4-emu QEMU changes against v11.1.2
-Exported from branch usb4-emu at f1e36f8
+Exported from branch usb4-emu at f381f01
 
+  f381f01 usb4: QMP fault injection on ring 0, x-cable, host resets, ICM mode
   f1e36f8 usb4: tb3-ice-lake, the Ice Lake firmware CM variant
   0702fa0 tests/qtest: cover RSM in x86-smm-tlb-test, gate it on VGA
   5748fdd target/i386: flush the TLB on SMM entry and RSM
@@ -2153,10 +2154,10 @@ index 0000000000000000000000000000000000000000..9d3d485beb9537faabd9e09f5eb4ce2b
 +    select USB
 diff --git a/hw/usb4/meson.build b/hw/usb4/meson.build
 new file mode 100644
-index 0000000000000000000000000000000000000000..b41f84b609ea07c2c596c6d9ee362da7571d805e
+index 0000000000000000000000000000000000000000..bfa1b78b351254e9fa4f58a3870554fa684d0191
 --- /dev/null
 +++ b/hw/usb4/meson.build
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,36 @@
 +system_ss.add(when: 'CONFIG_USB4', if_true: files(
 +  'usb4-host.c',       # host interface: PCI function, BAR0, rings, IRQs
 +  'usb4-ctl.c',        # control packet framing and CRC32C
@@ -2180,6 +2181,7 @@ index 0000000000000000000000000000000000000000..b41f84b609ea07c2c596c6d9ee362da7
 +  'usb4-usb3.c',       # USB devices behind the USB3 tunnel, xHCI _DSD
 +  'usb4-icm.c',        # emulated Alpine Ridge firmware CM (ICM)
 +  'usb4-harness.c',    # test harness: NVMe fault rules, gate overrides
++  'usb4-fault.c',      # QMP fault injection: ring 0 replies, resets
 +), if_false: files('usb4-acpi-stub.c'))
 +system_ss.add(when: ['CONFIG_USB4', 'CONFIG_XIO3130'], if_true: files(
 +  'usb4-tunnel-dsp.c', # daisy chain: gated hot-plug switch downstream port
@@ -2194,10 +2196,10 @@ index 0000000000000000000000000000000000000000..b41f84b609ea07c2c596c6d9ee362da7
 +))
 diff --git a/hw/usb4/trace-events b/hw/usb4/trace-events
 new file mode 100644
-index 0000000000000000000000000000000000000000..91e5431ec754e2db0ccf02ad86f7424c28700a7a
+index 0000000000000000000000000000000000000000..bdc8815fc9302c1b7ea178e0889da763fc2ec844
 --- /dev/null
 +++ b/hw/usb4/trace-events
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,181 @@
 +# See docs/devel/tracing.rst for syntax documentation.
 +# usb4-emu fabric. Route strings are 64-bit: bit 63 is the CM bit.
 +
@@ -2284,6 +2286,7 @@ index 0000000000000000000000000000000000000000..91e5431ec754e2db0ccf02ad86f7424c
 +usb4_device_realize(const char *id, unsigned port, const char *dialect, const char *drive) "device router %s on port %u dialect %s drive %s"
 +usb4_device_unrealize(const char *id, unsigned port) "device router %s removed from port %u"
 +usb4_device_chain(const char *id, const char *parent, unsigned port, const char *state) "device router %s parent %s downstream port %u: %s"
++usb4_device_cable(const char *id, int in) "device router %s: cable in=%d (x-cable)"
 +
 +# usb4-tunnel-port.c
 +usb4_tp_set_state(const char *port, const char *state, const char *reason, int ep_state) "%s: tunnel %s (%s), endpoint state %d"
@@ -2372,6 +2375,12 @@ index 0000000000000000000000000000000000000000..91e5431ec754e2db0ccf02ad86f7424c
 +# usb4-debug-port.c
 +usb4_dbg_stage(uint64_t seq, uint32_t code, uint32_t arg, int64_t host_ns, int64_t vm_ns) "stage #%" PRIu64 " code=0x%x arg=0x%x host_ns=%" PRId64 " vm_ns=%" PRId64
 +usb4_dbg_marker(uint64_t seq, uint64_t value, int64_t host_ns, int64_t vm_ns) "marker #%" PRIu64 " value=0x%" PRIx64 " host_ns=%" PRId64 " vm_ns=%" PRId64
++
++# usb4-fault.c
++usb4_fault_fire(unsigned rule, unsigned pdf, size_t len, const char *acts, int64_t vm_ns) "reply fault rule %u fired: pdf %u len %zu acts=%s vm_ns=%" PRId64
++usb4_fault_deliver(unsigned pdf, size_t len, const char *what, int64_t vm_ns) "reply fault: pdf %u len %zu %s vm_ns=%" PRId64
++usb4_fault_reset(const char *kind) "injected host reset: %s"
++usb4_fault_cable(const char *id, int in, const char *why) "cable of %s in=%d not changed: %s"
 diff --git a/hw/usb4/trace.h b/hw/usb4/trace.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..597a08ff1131699a3bdae25fe29afb94b57287db
@@ -3938,10 +3947,10 @@ index 0000000000000000000000000000000000000000..8f8591ad4e28e89a82aa16f8a5157a2d
 +type_init(dbg_register_types)
 diff --git a/hw/usb4/usb4-device.c b/hw/usb4/usb4-device.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..a68b7df612c2529e79ebac875db4825a72cdd68f
+index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea43633d4c4e0c
 --- /dev/null
 +++ b/hw/usb4/usb4-device.c
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,662 @@
 +/*
 + * USB4 / Thunderbolt 3 device router on the usb4 bus
 + *
@@ -4035,6 +4044,7 @@ index 0000000000000000000000000000000000000000..a68b7df612c2529e79ebac875db4825a
 +    /* PCI side of each downstream port's PCIe Down adapter */
 +    USB4TunnelPort *dfp_target[USB4_DEV_MAX_DFP + 1];
 +    void *router;           /* fabric-owned router state, NULL = detached */
++    bool cable_out;         /* x-cable off: pulled, stays unplugged */
 +};
 +
 +USB4DeviceModel usb4_device_model(USB4Device *d)
@@ -4185,7 +4195,8 @@ index 0000000000000000000000000000000000000000..a68b7df612c2529e79ebac875db4825a
 +    USB4Fabric *f = usb4_host_get_fabric(c->host);
 +    Error *err = NULL;
 +
-+    if (!f || c->router || !c->parent_dev || !c->parent_dev->router) {
++    if (!f || c->router || c->cable_out || !c->parent_dev ||
++        !c->parent_dev->router) {
 +        return;
 +    }
 +    if (!usb4_fabric_attach_chained(f, c->parent_dev, c->port, c, &err)) {
@@ -4406,7 +4417,7 @@ index 0000000000000000000000000000000000000000..a68b7df612c2529e79ebac875db4825a
 +    if (parent) {
 +        /* Plugged now if the parent is; else when the parent is. */
 +        attach_child(d);
-+    } else if (!usb4_fabric_attach(f, d->port, d, errp)) {
++    } else if (!d->cable_out && !usb4_fabric_attach(f, d->port, d, errp)) {
 +        usb4_host_release_port(h, d->port, d);
 +        d->host = NULL;
 +        return;
@@ -4491,6 +4502,61 @@ index 0000000000000000000000000000000000000000..a68b7df612c2529e79ebac875db4825a
 +}
 +
 +/*
++ * Test-only (docs/FAULTS.md): the cable. Pulling it unplugs this router
++ * and every router below it exactly as device_del does (surprise: the
++ * parent reports the hot unplug, or the firmware CM device
++ * disconnected, and every tunnel in the subtree goes down with its gate
++ * closed in this call), but the object stays, with its configuration.
++ * Putting it back plugs the same router in again, with the routers
++ * below it whose own cable is in. Before realize it only records the
++ * state, so x-cable=off on -device starts unplugged.
++ */
++bool usb4_device_set_cable(USB4Device *d, bool in, Error **errp)
++{
++    USB4Fabric *f;
++
++    if (in == !d->cable_out) {
++        return true;
++    }
++    d->cable_out = !in;
++    trace_usb4_device_cable(dev_id(d), in);
++    f = d->host ? usb4_host_get_fabric(d->host) : NULL;
++    if (!f) {
++        return true;
++    }
++    if (!in) {
++        if (d->router) {
++            usb4_fabric_detach_device(f, d);
++        }
++        usb4_usb3_device_unrealized(d);
++        return true;
++    }
++    if (d->parent_dev) {
++        attach_child(d);
++    } else if (!d->parent) {
++        if (!usb4_fabric_attach(f, d->port, d, errp)) {
++            d->cable_out = true;
++            return false;
++        }
++    }
++    if (d->router) {
++        attach_children(d, 0);
++        usb4_usb3_device_realized(d);
++    }
++    return true;
++}
++
++static bool usb4_device_get_cable(Object *obj, Error **errp)
++{
++    return !USB4_DEVICE(obj)->cable_out;
++}
++
++static void usb4_device_set_cable_prop(Object *obj, bool in, Error **errp)
++{
++    usb4_device_set_cable(USB4_DEVICE(obj), in, errp);
++}
++
++/*
 + * Debug/test: the registered tunnel target of each downstream port, as
 + * canonical QOM paths separated by commas ("-" for none).
 + */
@@ -4517,6 +4583,11 @@ index 0000000000000000000000000000000000000000..a68b7df612c2529e79ebac875db4825a
 +                                   usb4_device_get_attached, NULL);
 +    object_class_property_add_str(klass, "x-pcie-down",
 +                                  usb4_device_get_pcie_down, NULL);
++    object_class_property_add_bool(klass, "x-cable", usb4_device_get_cable,
++                                   usb4_device_set_cable_prop);
++    object_class_property_set_description(klass, "x-cable",
++        "Test-only: off pulls the cable (surprise removal, the object "
++        "stays), on puts it back (docs/FAULTS.md)");
 +
 +    dc->realize = usb4_device_realize;
 +    dc->unrealize = usb4_device_unrealize;
@@ -7137,6 +7208,697 @@ index 0000000000000000000000000000000000000000..2bf9a09e71bb853b43fb92bc7e660919
 +                            n, ok);
 +    return ok;
 +}
+diff --git a/hw/usb4/usb4-fault.c b/hw/usb4/usb4-fault.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..074e5b325ebf6cf7a8392cd2c4996470b836a565
+--- /dev/null
++++ b/hw/usb4/usb4-fault.c
+@@ -0,0 +1,685 @@
++/*
++ * USB4 / Thunderbolt 3 host emulator: QMP fault injection on ring 0
++ *
++ * Copyright (c) 2026 usb4-emu contributors
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Written from scratch for the usb4-emu project. Test-only controls on
++ * usb4-host (docs/FAULTS.md, roadmap M6). Every property starts with
++ * "x-", defaults to off and changes nothing until it is set:
++ *
++ *   x-reply-faults       rules that drop, delay or duplicate frames the
++ *                        host interface is about to queue on RX ring 0
++ *                        (control packet responses and events from the
++ *                        fabric, ICM responses and events), and that
++ *                        can unplug a device router or reset the host
++ *                        at that moment
++ *   x-reply-fault-state  per-rule match/fire counters, delayed frames
++ *   x-host-reset         write "router" or "interface": a reset the
++ *                        guest did not ask for
++ *   x-icm-mode           the operating mode the firmware CM reports in
++ *                        the outbound mailbox (ICM-PROTOCOL.md 2.3):
++ *                        default 3 (connection manager mode, as
++ *                        captured), 0 safe mode
++ *
++ * A rule is matched in usb4_host_rx_frame(), the one place every frame
++ * for the guest passes, before the RX ring checks. Frames are matched as
++ * the fabric or ICM produced them. Side actions that change the fabric
++ * (unplug, host reset) run from a bottom half: a frame can be queued
++ * from inside an MMIO write (a TX doorbell) and nothing hot-plugs from
++ * MMIO context (AGENTS.md).
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qapi/visitor.h"
++#include "qapi/qapi-events-misc.h"
++#include "qemu/bswap.h"
++#include "qemu/cutils.h"
++#include "qemu/main-loop.h"
++#include "qemu/timer.h"
++#include "qom/object.h"
++#include "hw/core/qdev.h"
++#include "usb4-internal.h"
++#include "trace.h"
++
++enum {
++    F_A_DROP        = 1u << 0,
++    F_A_DELAY       = 1u << 1,
++    F_A_DUP         = 1u << 2,
++    F_A_UNPLUG      = 1u << 3,
++    F_A_REPLUG      = 1u << 4,
++    F_A_HOST_RESET  = 1u << 5,
++    F_A_HI_RESET    = 1u << 6,
++    F_A_NONE        = 1u << 7,
++};
++
++static const struct {
++    const char *name;
++    uint32_t bit;
++} f_acts[] = {
++    { "drop", F_A_DROP },
++    { "delay", F_A_DELAY },
++    { "dup", F_A_DUP },
++    { "unplug", F_A_UNPLUG },
++    { "replug", F_A_REPLUG },
++    { "host-reset", F_A_HOST_RESET },
++    { "hi-reset", F_A_HI_RESET },
++    { "none", F_A_NONE },
++};
++
++/* Frame types by name (Spec Table 6-3; ICM-PROTOCOL.md 2.4). */
++static const struct {
++    const char *name;
++    int pdf;
++} f_pdfs[] = {
++    { "read", USB4_PDF_READ },
++    { "write", USB4_PDF_WRITE },
++    { "notify", USB4_PDF_NOTIFY },
++    { "hotplug", USB4_PDF_HOTPLUG },
++    { "xdomain-req", USB4_PDF_XDOMAIN_REQ },
++    { "xdomain-resp", USB4_PDF_XDOMAIN_RESP },
++    { "icm-event", USB4_PDF_ICM_EVENT },
++    { "icm-resp", USB4_PDF_ICM_RESP },
++};
++
++#define F_ANY   (-1)
++
++typedef struct FRule {
++    char *text;
++    int pdf;                /* F_ANY or a PDF */
++    bool has_route;
++    uint64_t route;         /* control packets: Route String */
++    int code;               /* ICM frames: packet code, F_ANY */
++    uint32_t nth;
++    bool repeat;
++    uint32_t acts;
++    uint32_t delay_ms;
++    char *dev;              /* unplug / replug: usb4-device id */
++    uint32_t matched, fired;
++} FRule;
++
++typedef struct FDelayed {
++    USB4Faults *fl;
++    QEMUTimer *timer;
++    uint8_t pdf;
++    size_t len;
++    uint8_t data[];
++} FDelayed;
++
++struct USB4Faults {
++    USB4Host *h;
++    char *rules_text;
++    GPtrArray *rules;       /* FRule * */
++    GList *delayed;         /* FDelayed * */
++    QEMUBH *bh;
++    GPtrArray *bh_unplug;   /* char *: ids to unplug from the BH */
++    GPtrArray *bh_replug;
++    bool bh_router_reset;
++    bool bh_hi_reset;
++    bool redelivering;      /* a delayed frame: not matched again */
++    uint8_t icm_mode;
++    uint32_t resets_router, resets_hi;
++    uint32_t dropped, delayed_total;
++};
++
++static void f_rule_free(gpointer p)
++{
++    FRule *r = p;
++
++    g_free(r->text);
++    g_free(r->dev);
++    g_free(r);
++}
++
++static bool f_parse_u64(const char *v, uint64_t *out)
++{
++    return !qemu_strtou64(v, NULL, 0, out);
++}
++
++static FRule *f_parse_rule(const char *text, Error **errp)
++{
++    g_auto(GStrv) items = g_strsplit_set(text, " \t", -1);
++    FRule *r = g_new0(FRule, 1);
++    uint64_t v;
++
++    r->text = g_strstrip(g_strdup(text));
++    r->pdf = F_ANY;
++    r->code = F_ANY;
++    r->nth = 1;
++    for (char **it = items; *it; it++) {
++        char *eq;
++        const char *key, *val;
++
++        if (!**it) {
++            continue;
++        }
++        eq = strchr(*it, '=');
++        if (!eq) {
++            error_setg(errp, "x-reply-faults: '%s' is not key=value", *it);
++            goto fail;
++        }
++        *eq = 0;
++        key = *it;
++        val = eq + 1;
++        if (!strcmp(key, "pdf")) {
++            if (!strcmp(val, "any")) {
++                r->pdf = F_ANY;
++                continue;
++            }
++            r->pdf = -2;
++            for (unsigned i = 0; i < ARRAY_SIZE(f_pdfs); i++) {
++                if (!strcmp(val, f_pdfs[i].name)) {
++                    r->pdf = f_pdfs[i].pdf;
++                }
++            }
++            if (r->pdf == -2) {
++                if (!f_parse_u64(val, &v) || v > 15) {
++                    error_setg(errp, "x-reply-faults: bad pdf '%s'", val);
++                    goto fail;
++                }
++                r->pdf = v;
++            }
++        } else if (!strcmp(key, "route")) {
++            if (!f_parse_u64(val, &v)) {
++                error_setg(errp, "x-reply-faults: bad route '%s'", val);
++                goto fail;
++            }
++            r->has_route = true;
++            r->route = v;
++        } else if (!strcmp(key, "code")) {
++            if (!f_parse_u64(val, &v) || v > 0xff) {
++                error_setg(errp, "x-reply-faults: bad code '%s'", val);
++                goto fail;
++            }
++            r->code = v;
++        } else if (!strcmp(key, "nth")) {
++            if (!f_parse_u64(val, &v) || v < 1 || v > UINT32_MAX) {
++                error_setg(errp, "x-reply-faults: bad nth '%s'", val);
++                goto fail;
++            }
++            r->nth = v;
++        } else if (!strcmp(key, "repeat")) {
++            if (strcmp(val, "on") && strcmp(val, "off")) {
++                error_setg(errp, "x-reply-faults: repeat is on or off");
++                goto fail;
++            }
++            r->repeat = !strcmp(val, "on");
++        } else if (!strcmp(key, "delay")) {
++            if (!f_parse_u64(val, &v) || v > 3600 * 1000) {
++                error_setg(errp, "x-reply-faults: bad delay '%s'", val);
++                goto fail;
++            }
++            r->delay_ms = v;
++        } else if (!strcmp(key, "dev")) {
++            g_free(r->dev);
++            r->dev = g_strdup(val);
++        } else if (!strcmp(key, "act")) {
++            g_auto(GStrv) acts = g_strsplit(val, "+", -1);
++
++            for (char **a = acts; *a; a++) {
++                uint32_t bit = 0;
++
++                for (unsigned i = 0; i < ARRAY_SIZE(f_acts); i++) {
++                    if (!strcmp(*a, f_acts[i].name)) {
++                        bit = f_acts[i].bit;
++                    }
++                }
++                if (!bit) {
++                    error_setg(errp, "x-reply-faults: unknown action '%s'",
++                               *a);
++                    goto fail;
++                }
++                r->acts |= bit;
++            }
++        } else {
++            error_setg(errp, "x-reply-faults: unknown key '%s'", key);
++            goto fail;
++        }
++    }
++    if (!r->acts) {
++        error_setg(errp, "x-reply-faults: rule '%s' has no act=", r->text);
++        goto fail;
++    }
++    if ((r->acts & (F_A_UNPLUG | F_A_REPLUG)) && !r->dev) {
++        error_setg(errp, "x-reply-faults: unplug and replug need dev=<id>");
++        goto fail;
++    }
++    if ((r->acts & F_A_DELAY) && !r->delay_ms) {
++        error_setg(errp, "x-reply-faults: delay needs delay=<ms> > 0");
++        goto fail;
++    }
++    if (r->has_route && r->pdf != F_ANY &&
++        (r->pdf == USB4_PDF_ICM_EVENT || r->pdf == USB4_PDF_ICM_RESP)) {
++        error_setg(errp, "x-reply-faults: ICM frames carry no route string");
++        goto fail;
++    }
++    return r;
++
++fail:
++    f_rule_free(r);
++    return NULL;
++}
++
++static void f_set_rules(USB4Faults *fl, const char *text, Error **errp)
++{
++    g_auto(GStrv) parts = g_strsplit(text ? text : "", ";", -1);
++    GPtrArray *rules = g_ptr_array_new_with_free_func(f_rule_free);
++
++    for (char **p = parts; *p; p++) {
++        FRule *r;
++
++        if (!*g_strstrip(*p)) {
++            continue;
++        }
++        r = f_parse_rule(*p, errp);
++        if (!r) {
++            g_ptr_array_free(rules, true);
++            return;             /* the previous rules stay in force */
++        }
++        g_ptr_array_add(rules, r);
++    }
++    g_ptr_array_free(fl->rules, true);
++    fl->rules = rules;
++    g_free(fl->rules_text);
++    fl->rules_text = g_strdup(text ? text : "");
++}
++
++/* ------------------------------------------------------------------ */
++/* Matching                                                             */
++/* ------------------------------------------------------------------ */
++
++static bool f_is_ctl(uint8_t pdf)
++{
++    return pdf >= USB4_PDF_READ && pdf <= USB4_PDF_NOTIFY_ACK_ENH;
++}
++
++static bool f_match(FRule *r, uint8_t pdf, const uint8_t *f, size_t len)
++{
++    if (r->pdf != F_ANY && r->pdf != pdf) {
++        return false;
++    }
++    if (r->has_route) {
++        uint64_t route;
++
++        /* Spec 6.4.1: Route String High (bit 31 is the CM bit), Low */
++        if (!f_is_ctl(pdf) || len < 8) {
++            return false;
++        }
++        route = ((uint64_t)(ldl_be_p(f) & 0x7fffffffu) << 32) |
++                ldl_be_p(f + 4);
++        if (route != r->route) {
++            return false;
++        }
++    }
++    if (r->code != F_ANY) {
++        /* ICM-PROTOCOL.md 3.1: the code is bits 7:0 of the first word */
++        if ((pdf != USB4_PDF_ICM_EVENT && pdf != USB4_PDF_ICM_RESP) ||
++            len < 4 || f[3] != r->code) {
++            return false;
++        }
++    }
++    return true;
++}
++
++static void f_acts_str(GString *s, uint32_t acts)
++{
++    for (unsigned i = 0; i < ARRAY_SIZE(f_acts); i++) {
++        if (acts & f_acts[i].bit) {
++            g_string_append_printf(s, "%s%s", s->len ? "+" : "",
++                                   f_acts[i].name);
++        }
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Delayed delivery                                                     */
++/* ------------------------------------------------------------------ */
++
++static void f_delayed_free(FDelayed *d)
++{
++    timer_free(d->timer);
++    g_free(d);
++}
++
++static void f_delayed_fire(void *opaque)
++{
++    FDelayed *d = opaque;
++    USB4Faults *fl = d->fl;
++
++    fl->delayed = g_list_remove(fl->delayed, d);
++    trace_usb4_fault_deliver(d->pdf, d->len, "delayed",
++                             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
++    /* a delayed frame is not matched again: it goes to the RX path */
++    usb4_host_rx_deliver(fl->h, d->pdf, d->data, d->len);
++    f_delayed_free(d);
++}
++
++static void f_delay(USB4Faults *fl, uint8_t pdf, const uint8_t *frame,
++                    size_t len, uint32_t ms)
++{
++    FDelayed *d = g_malloc0(sizeof(*d) + len);
++
++    d->fl = fl;
++    d->pdf = pdf;
++    d->len = len;
++    memcpy(d->data, frame, len);
++    d->timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, f_delayed_fire, d);
++    fl->delayed = g_list_append(fl->delayed, d);
++    fl->delayed_total++;
++    timer_mod(d->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + ms);
++}
++
++void usb4_faults_hi_reset(USB4Faults *fl)
++{
++    if (!fl) {
++        return;
++    }
++    while (fl->delayed) {
++        FDelayed *d = fl->delayed->data;
++
++        fl->delayed = g_list_delete_link(fl->delayed, fl->delayed);
++        trace_usb4_fault_deliver(d->pdf, d->len, "discarded by reset",
++                                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
++        f_delayed_free(d);
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Side actions (bottom half)                                           */
++/* ------------------------------------------------------------------ */
++
++static USB4Device *f_find_dev(USB4Faults *fl, const char *id)
++{
++    Object *per = object_resolve_path("/machine/peripheral", NULL);
++    Object *o = per ? object_resolve_path_component(per, id) : NULL;
++    USB4Device *d = o ? (USB4Device *)object_dynamic_cast(o,
++                                                          TYPE_USB4_DEVICE)
++                      : NULL;
++
++    return d && usb4_device_host(d) == fl->h ? d : NULL;
++}
++
++static void f_cable(USB4Faults *fl, const char *id, bool in)
++{
++    USB4Device *d = f_find_dev(fl, id);
++    Error *err = NULL;
++
++    if (!d) {
++        trace_usb4_fault_cable(id, in, "no such usb4-device on this host");
++        return;
++    }
++    if (!usb4_device_set_cable(d, in, &err)) {
++        trace_usb4_fault_cable(id, in, error_get_pretty(err));
++        error_free(err);
++    }
++}
++
++static void f_bh(void *opaque)
++{
++    USB4Faults *fl = opaque;
++
++    if (fl->bh_router_reset || fl->bh_hi_reset) {
++        bool router = fl->bh_router_reset;
++
++        fl->bh_router_reset = fl->bh_hi_reset = false;
++        if (router) {
++            fl->resets_router++;
++        } else {
++            fl->resets_hi++;
++        }
++        usb4_host_inject_reset(fl->h, router);
++    }
++    while (fl->bh_unplug->len) {
++        g_autofree char *id = g_ptr_array_steal_index(fl->bh_unplug, 0);
++
++        f_cable(fl, id, false);
++    }
++    while (fl->bh_replug->len) {
++        g_autofree char *id = g_ptr_array_steal_index(fl->bh_replug, 0);
++
++        f_cable(fl, id, true);
++    }
++}
++
++/*
++ * Called for every frame the fabric or ICM queues for RX ring 0. True
++ * if the frame was consumed (dropped, or delayed for later delivery).
++ */
++bool usb4_faults_rx(USB4Faults *fl, uint8_t pdf, const uint8_t *frame,
++                    size_t len)
++{
++    uint32_t acts = 0, delay_ms = 0, dup_ms = 0;
++    bool dup = false;
++
++    if (!fl->rules->len) {
++        return false;
++    }
++    for (unsigned i = 0; i < fl->rules->len; i++) {
++        FRule *r = g_ptr_array_index(fl->rules, i);
++        g_autoptr(GString) s = NULL;
++        g_autofree char *path = NULL;
++
++        if (!f_match(r, pdf, frame, len)) {
++            continue;
++        }
++        r->matched++;
++        if (r->matched < r->nth || (!r->repeat && r->matched > r->nth)) {
++            continue;
++        }
++        r->fired++;
++        acts |= r->acts;
++        if (r->acts & F_A_DELAY) {
++            delay_ms = MAX(delay_ms, r->delay_ms);
++        }
++        if (r->acts & F_A_DUP) {
++            dup = true;
++            dup_ms = MAX(dup_ms, r->delay_ms);
++        }
++        if (r->acts & F_A_UNPLUG) {
++            g_ptr_array_add(fl->bh_unplug, g_strdup(r->dev));
++        }
++        if (r->acts & F_A_REPLUG) {
++            g_ptr_array_add(fl->bh_replug, g_strdup(r->dev));
++        }
++        if (r->acts & F_A_HOST_RESET) {
++            fl->bh_router_reset = true;
++        }
++        if (r->acts & F_A_HI_RESET) {
++            fl->bh_hi_reset = true;
++        }
++        s = g_string_new("");
++        f_acts_str(s, r->acts);
++        trace_usb4_fault_fire(i, pdf, len, s->str,
++                              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
++        path = object_get_canonical_path(OBJECT(fl->h));
++        qapi_event_send_usb4_reply_fault(path, i, pdf, s->str);
++    }
++    if (acts & (F_A_UNPLUG | F_A_REPLUG | F_A_HOST_RESET | F_A_HI_RESET)) {
++        qemu_bh_schedule(fl->bh);
++    }
++    if (acts & F_A_DROP) {
++        /* drop wins over delay and dup */
++        fl->dropped++;
++        trace_usb4_fault_deliver(pdf, len, "dropped",
++                                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
++        return true;
++    }
++    if (dup) {
++        /* a second, stale copy after dup_ms (0: right behind this one) */
++        f_delay(fl, pdf, frame, len, dup_ms);
++    }
++    if (acts & F_A_DELAY) {
++        f_delay(fl, pdf, frame, len, delay_ms);
++        return true;
++    }
++    return false;
++}
++
++uint8_t usb4_faults_icm_mode(USB4Faults *fl)
++{
++    return fl->icm_mode;
++}
++
++/* ------------------------------------------------------------------ */
++/* Properties                                                           */
++/* ------------------------------------------------------------------ */
++
++static void f_get_str(Visitor *v, const char *name, char *str, Error **errp)
++{
++    visit_type_str(v, name, &str, errp);
++    g_free(str);
++}
++
++static void f_get_rules(Object *obj, Visitor *v, const char *name,
++                        void *opaque, Error **errp)
++{
++    USB4Faults *fl = opaque;
++
++    f_get_str(v, name, g_strdup(fl->rules_text), errp);
++}
++
++static void f_set_rules_prop(Object *obj, Visitor *v, const char *name,
++                             void *opaque, Error **errp)
++{
++    g_autofree char *val = NULL;
++
++    if (visit_type_str(v, name, &val, errp)) {
++        f_set_rules(opaque, val, errp);
++    }
++}
++
++static void f_get_state(Object *obj, Visitor *v, const char *name,
++                        void *opaque, Error **errp)
++{
++    USB4Faults *fl = opaque;
++    GString *s = g_string_new("");
++
++    for (unsigned i = 0; i < fl->rules->len; i++) {
++        FRule *r = g_ptr_array_index(fl->rules, i);
++
++        g_string_append_printf(s, "rule%u=%u/%u ", i, r->matched, r->fired);
++    }
++    g_string_append_printf(s, "dropped=%u delayed=%u pending=%u "
++                           "resets=router:%u,interface:%u icm-mode=%u",
++                           fl->dropped, fl->delayed_total,
++                           g_list_length(fl->delayed), fl->resets_router,
++                           fl->resets_hi, fl->icm_mode);
++    f_get_str(v, name, g_string_free(s, false), errp);
++}
++
++static void f_get_reset(Object *obj, Visitor *v, const char *name,
++                        void *opaque, Error **errp)
++{
++    USB4Faults *fl = opaque;
++
++    f_get_str(v, name, g_strdup_printf("router=%u interface=%u",
++                                       fl->resets_router, fl->resets_hi),
++              errp);
++}
++
++static void f_set_reset(Object *obj, Visitor *v, const char *name,
++                        void *opaque, Error **errp)
++{
++    USB4Faults *fl = opaque;
++    g_autofree char *val = NULL;
++    bool router;
++
++    if (!visit_type_str(v, name, &val, errp)) {
++        return;
++    }
++    if (!strcmp(val, "router")) {
++        router = true;
++    } else if (!strcmp(val, "interface")) {
++        router = false;
++    } else {
++        error_setg(errp, "x-host-reset: router or interface");
++        return;
++    }
++    if (!DEVICE(fl->h)->realized) {
++        error_setg(errp, "x-host-reset: the host is not realized");
++        return;
++    }
++    trace_usb4_fault_reset(val);
++    if (router) {
++        fl->resets_router++;
++    } else {
++        fl->resets_hi++;
++    }
++    /* QMP runs outside MMIO context: reset now, as an MMIO write would */
++    usb4_host_inject_reset(fl->h, router);
++}
++
++static void f_get_mode(Object *obj, Visitor *v, const char *name,
++                       void *opaque, Error **errp)
++{
++    USB4Faults *fl = opaque;
++
++    visit_type_uint8(v, name, &fl->icm_mode, errp);
++}
++
++static void f_set_mode(Object *obj, Visitor *v, const char *name,
++                       void *opaque, Error **errp)
++{
++    USB4Faults *fl = opaque;
++    uint8_t m;
++
++    if (!visit_type_uint8(v, name, &m, errp)) {
++        return;
++    }
++    if (m > 15) {
++        error_setg(errp, "x-icm-mode: 0..15 (bits 11:8 of the outbound "
++                   "mailbox)");
++        return;
++    }
++    fl->icm_mode = m;
++}
++
++USB4Faults *usb4_faults_new(USB4Host *h)
++{
++    USB4Faults *fl = g_new0(USB4Faults, 1);
++    Object *obj = OBJECT(h);
++
++    fl->h = h;
++    fl->rules = g_ptr_array_new_with_free_func(f_rule_free);
++    fl->rules_text = g_strdup("");
++    fl->bh_unplug = g_ptr_array_new_with_free_func(g_free);
++    fl->bh_replug = g_ptr_array_new_with_free_func(g_free);
++    fl->bh = qemu_bh_new(f_bh, fl);
++    fl->icm_mode = 3;       /* connection manager mode, observed (2.3) */
++
++    object_property_add(obj, "x-reply-faults", "str", f_get_rules,
++                        f_set_rules_prop, NULL, fl);
++    object_property_set_description(obj, "x-reply-faults",
++        "Test-only ring 0 RX fault rules, separated by ';' "
++        "(docs/FAULTS.md)");
++    object_property_add(obj, "x-reply-fault-state", "str", f_get_state,
++                        NULL, NULL, fl);
++    object_property_set_description(obj, "x-reply-fault-state",
++        "Rule match/fire counters, dropped and delayed frames, resets");
++    object_property_add(obj, "x-host-reset", "str", f_get_reset,
++                        f_set_reset, NULL, fl);
++    object_property_set_description(obj, "x-host-reset",
++        "Test-only: write 'router' (host router reset) or 'interface' "
++        "(host interface reset); reads the counts");
++    object_property_add(obj, "x-icm-mode", "uint8", f_get_mode, f_set_mode,
++                        NULL, fl);
++    object_property_set_description(obj, "x-icm-mode",
++        "Test-only: operating mode in the outbound mailbox, bits 11:8 "
++        "(3 connection manager, 0 safe mode)");
++    return fl;
++}
++
++void usb4_faults_free(USB4Faults *fl)
++{
++    if (!fl) {
++        return;
++    }
++    usb4_faults_hi_reset(fl);
++    qemu_bh_delete(fl->bh);
++    g_ptr_array_free(fl->rules, true);
++    g_ptr_array_free(fl->bh_unplug, true);
++    g_ptr_array_free(fl->bh_replug, true);
++    g_free(fl->rules_text);
++    g_free(fl);
++}
 diff --git a/hw/usb4/usb4-harness.c b/hw/usb4/usb4-harness.c
 new file mode 100644
 index 0000000000000000000000000000000000000000..bf69e154f2729cabde3b7ac68faf7bc0c7d33df8
@@ -8879,10 +9641,10 @@ index 0000000000000000000000000000000000000000..3e94279e23d6a66baf8f359d4cb2577d
 +#endif
 diff --git a/hw/usb4/usb4-host.c b/hw/usb4/usb4-host.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5f5cded87
+index 0000000000000000000000000000000000000000..74f5114b08f6e250b503d8ba811f8c74e3a6eafe
 --- /dev/null
 +++ b/hw/usb4/usb4-host.c
-@@ -0,0 +1,3191 @@
+@@ -0,0 +1,3244 @@
 +/*
 + * USB4 / Thunderbolt 3 host interface (the "NHI" PCI function)
 + *
@@ -9283,6 +10045,7 @@ index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5
 +    Notifier machine_done;      /* check the xhci property (R33) */
 +    bool post_reset_on;         /* post_reset registered (ICM, preos-cm) */
 +    USB4Fabric *fabric;
++    USB4Faults *faults;         /* test-only fault injection, FAULTS.md */
 +    USB4Device *port_dev[USB4_HI_MAX_PORTS + 1];
 +    /* R33: a port's device in USB mode, a usb-uas or usb-storage */
 +    DeviceState *usb_dev[USB4_HI_MAX_PORTS + 1];
@@ -9812,11 +10575,21 @@ index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5
 +void usb4_host_rx_frame(USB4Host *h, uint8_t pdf,
 +                        const uint8_t *frame, size_t len)
 +{
-+    USB4RxFrame *fr;
-+
 +    if (!h) {
 +        return;
 +    }
++    /* Test-only reply faults: drop or delay (usb4-fault.c, FAULTS.md) */
++    if (h->faults && usb4_faults_rx(h->faults, pdf, frame, len)) {
++        return;
++    }
++    usb4_host_rx_deliver(h, pdf, frame, len);
++}
++
++void usb4_host_rx_deliver(USB4Host *h, uint8_t pdf,
++                          const uint8_t *frame, size_t len)
++{
++    USB4RxFrame *fr;
++
 +    usb4_host_trace_frame(false, pdf, frame, len);
 +    if (len > USB4_HI_MAX_BUF) {
 +        trace_usb4_host_frame_drop("too long", pdf, len);
@@ -10016,6 +10789,10 @@ index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5
 +    s->cl2_enable = 0;
 +    s->tx_blocked = false;
 +    usb4_host_rx_fifo_clear(s);
++    if (s->faults) {
++        /* delayed replies were inside the host interface: lost */
++        usb4_faults_hi_reset(s->faults);
++    }
 +    usb4_host_update_intx(s);
 +    if (s->fabric) {
 +        usb4_fabric_host_reset(s->fabric);
@@ -10028,6 +10805,27 @@ index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5
 +    usb4_host_hi_reset(s, "host router reset");
 +    if (s->fabric) {
 +        usb4_fabric_reset(s->fabric);
++    }
++}
++
++/*
++ * Test-only (x-host-reset, docs/FAULTS.md): a reset the guest did not
++ * ask for. @router: Host Router Reset (12.6.3.1.2, under a firmware CM
++ * also the ICM's reset, usb4_fabric_reset()); else Host Interface Reset
++ * (12.6.3.1.3). Offered on every profile, Alpine Ridge included, which
++ * has no Host Router Reset register (R4): the fault models the
++ * controller resetting behind the driver's back. Never from MMIO
++ * context: QMP or a bottom half.
++ */
++void usb4_host_inject_reset(USB4Host *h, bool router)
++{
++    if (router) {
++        usb4_host_hi_reset(h, "injected host router reset");
++        if (h->fabric) {
++            usb4_fabric_reset(h->fabric);
++        }
++    } else {
++        usb4_host_hi_reset(h, "injected host interface reset");
 +    }
 +}
 +
@@ -10305,6 +11103,14 @@ index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5
 +        case R_TB3_OUTMAIL_CMD:
 +            v = TB3_AR_OUTMAIL |
 +                (s->been_d3 ? TB3_AR_OUTMAIL_AFTER_D3 : 0);
++            if (s->faults) {
++                /*
++                 * Operating mode, bits 11:8 (2.3); x-icm-mode, test
++                 * only: 0 safe mode, default 3 as captured.
++                 */
++                v = (v & ~0xf00u) |
++                    ((uint32_t)usb4_faults_icm_mode(s->faults) << 8);
++            }
 +            break;
 +        case R_TB3_FW_STS:
 +            v = TB3_AR_FW_STS;
@@ -11767,6 +12573,7 @@ index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5
 +    USB4Host *s = USB4_HOST(pd);
 +
 +    usb4_host_rx_fifo_clear(s);
++    usb4_faults_hi_reset(s->faults);
 +    usb4_icm_free(s->icm);
 +    s->icm = NULL;
 +    if (s->usb_bh) {
@@ -12052,6 +12859,13 @@ index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5
 +    /* R28: platform force power, settable at run time with qom-set */
 +    object_property_add_bool(obj, "force-power", usb4_host_get_force_power,
 +                             usb4_host_set_force_power);
++    /* Test-only fault injection (usb4-fault.c, docs/FAULTS.md) */
++    USB4_HOST(obj)->faults = usb4_faults_new(USB4_HOST(obj));
++}
++
++static void usb4_host_instance_finalize(Object *obj)
++{
++    usb4_faults_free(USB4_HOST(obj)->faults);
 +}
 +
 +static const TypeInfo usb4_host_info = {
@@ -12060,6 +12874,7 @@ index 0000000000000000000000000000000000000000..218f75e670a63a6f21cb9a1a8d36d2e5
 +    .instance_size = sizeof(USB4Host),
 +    .class_init = usb4_host_class_init,
 +    .instance_init = usb4_host_instance_init,
++    .instance_finalize = usb4_host_instance_finalize,
 +    .interfaces = (const InterfaceInfo[]) {
 +        { INTERFACE_PCIE_DEVICE },
 +        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
@@ -13378,10 +14193,10 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +}
 diff --git a/hw/usb4/usb4-internal.h b/hw/usb4/usb4-internal.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..bd71f59b71123cfebb373c3cdc03bc72798b6665
+index 0000000000000000000000000000000000000000..f7d2a7245e4e43f6dfa6d8cc8411558af8f02d80
 --- /dev/null
 +++ b/hw/usb4/usb4-internal.h
-@@ -0,0 +1,581 @@
+@@ -0,0 +1,608 @@
 +/*
 + * USB4 / Thunderbolt 3 host emulation - internal interfaces
 + *
@@ -13572,6 +14387,27 @@ index 0000000000000000000000000000000000000000..bd71f59b71123cfebb373c3cdc03bc72
 + */
 +void usb4_host_rx_frame(USB4Host *h, uint8_t pdf,
 +                        const uint8_t *frame, size_t len);
++/* The RX path of usb4_host_rx_frame() after the fault rules. */
++void usb4_host_rx_deliver(USB4Host *h, uint8_t pdf,
++                          const uint8_t *frame, size_t len);
++
++/*
++ * Test-only QMP fault injection on usb4-host (usb4-fault.c,
++ * docs/FAULTS.md): x-reply-faults, x-reply-fault-state, x-host-reset,
++ * x-icm-mode. usb4_faults_new() adds the properties to @h.
++ */
++typedef struct USB4Faults USB4Faults;
++USB4Faults *usb4_faults_new(USB4Host *h);
++void usb4_faults_free(USB4Faults *fl);
++/* True if the frame was consumed (dropped or delayed). */
++bool usb4_faults_rx(USB4Faults *fl, uint8_t pdf, const uint8_t *frame,
++                    size_t len);
++/* Host interface reset: delayed frames are discarded. */
++void usb4_faults_hi_reset(USB4Faults *fl);
++/* Operating mode for the outbound mailbox bits 11:8 (default 3). */
++uint8_t usb4_faults_icm_mode(USB4Faults *fl);
++/* A reset the guest did not ask for: host router or host interface. */
++void usb4_host_inject_reset(USB4Host *h, bool router);
 +
 +/* Host interface reset / guest driver gone: drop fabric-side pending
 + * state such as unacknowledged hot-plug retransmits. */
@@ -13849,6 +14685,12 @@ index 0000000000000000000000000000000000000000..bd71f59b71123cfebb373c3cdc03bc72
 +/* More device router accessors (DROM strings, 1-based host port). */
 +unsigned usb4_device_port(USB4Device *d);
 +USB4Host *usb4_device_host(USB4Device *d);
++/*
++ * Test-only (x-cable, docs/FAULTS.md): pull (@in false) or put back the
++ * cable of @d. Pulling is the surprise removal of device_del without
++ * destroying the object. Never from MMIO context.
++ */
++bool usb4_device_set_cable(USB4Device *d, bool in, Error **errp);
 +const char *usb4_device_vendor_name(USB4Device *d);
 +const char *usb4_device_model_name(USB4Device *d);
 +/* Dock mode: a PCIe switch with NVMe, NIC and xHCI behind the tunnel. */
@@ -23995,10 +24837,10 @@ index 34dd06f9f732dee7d3c6d0458da8bb67f23d76b4..8670ea906b3d1d79a8cd636dcb594259
       * Flush the record/replay queue. Now the VM state is going
       * to change. Therefore we don't need to preserve its consistency
 diff --git a/qapi/misc.json b/qapi/misc.json
-index c71a5fe65798854bc94e2b884cb8e5832fb5676d..7151f7a41e9746e732437f8d08ce1f02c34b70b1 100644
+index c71a5fe65798854bc94e2b884cb8e5832fb5676d..a0b42319bed515c5d19b89b19a41003779c3e7b8 100644
 --- a/qapi/misc.json
 +++ b/qapi/misc.json
-@@ -613,3 +613,62 @@
+@@ -613,3 +613,90 @@
  { 'event': 'VFU_CLIENT_HANGUP',
    'data': { 'vfu-id': 'str', 'vfu-qom-path': 'str',
              'dev-id': 'str', 'dev-qom-path': 'str' } }
@@ -24061,6 +24903,34 @@ index c71a5fe65798854bc94e2b884cb8e5832fb5676d..7151f7a41e9746e732437f8d08ce1f02
 +{ 'event': 'USB4_HARNESS',
 +  'data': { 'qom-path': 'str', 'rule': 'uint32', 'trigger': 'str',
 +            'token': 'uint64', 'actions': 'str' } }
++
++##
++# @USB4_REPLY_FAULT:
++#
++# Emitted by a usb4-host when one of its x-reply-faults rules fires on
++# a frame queued for RX ring 0 (usb4-emu docs/FAULTS.md).  Test-only.
++#
++# @qom-path: path to the usb4-host in the QOM tree
++#
++# @rule: index of the rule in x-reply-faults
++#
++# @pdf: the frame's PDF (1 read, 2 write, 3 notification, 5 hot plug
++#     event, 10 ICM event, 12 ICM response, ...)
++#
++# @actions: the rule's actions, joined with "+"
++#
++# Since: 11.2
++#
++# .. qmp-example::
++#
++#     <- { "event": "USB4_REPLY_FAULT",
++#          "data": { "qom-path": "/machine/peripheral/u4", "rule": 0,
++#                    "pdf": 12, "actions": "drop" },
++#          "timestamp": { "seconds": 1265044230, "microseconds": 450486 } }
++##
++{ 'event': 'USB4_REPLY_FAULT',
++  'data': { 'qom-path': 'str', 'rule': 'uint32', 'pdf': 'uint8',
++            'actions': 'str' } }
 diff --git a/scripts/symlink-install-tree.py b/scripts/symlink-install-tree.py
 index b72563895c5668d5947a31f36d6105463c943ac7..295673059ace2c1fca115eebe46a9e91e7c2d991 100644
 --- a/scripts/symlink-install-tree.py
@@ -24153,7 +25023,7 @@ index 4bbe18a86fbb8e10204829f373374a8a9194fafe..e9ac59fccecb862b8af6d9c7588eaad4
      qemu_log_mask(CPU_LOG_INT, "SMM: after RSM\n");
      log_cpu_state_mask(CPU_LOG_INT, CPU(cpu), CPU_DUMP_CCOP);
 diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
-index 78b30106496367362132cbdbfa6c535983241759..8eb5c57e6e34ae216a2eef183c20bfa8fb24f779 100644
+index 78b30106496367362132cbdbfa6c535983241759..cdcfeb15ef4fd210efd2b5fbbaa6f53bfdb90da7 100644
 --- a/tests/qtest/meson.build
 +++ b/tests/qtest/meson.build
 @@ -17,6 +17,7 @@ slow_qtests = {
@@ -24174,7 +25044,7 @@ index 78b30106496367362132cbdbfa6c535983241759..8eb5c57e6e34ae216a2eef183c20bfa8
    (config_all_devices.has_key('CONFIG_I440FX') ? ['ide-test'] : []) +                       \
    (config_all_devices.has_key('CONFIG_I440FX') ? ['numa-test'] : []) +                      \
    (config_all_devices.has_key('CONFIG_I440FX') ? ['test-x86-cpuid-compat'] : []) +          \
-@@ -74,9 +78,19 @@ qtests_i386 = \
+@@ -74,9 +78,20 @@ qtests_i386 = \
    (config_all_devices.has_key('CONFIG_WDT_IB700') ? ['wdt_ib700-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_PVPANIC_ISA') ? ['pvpanic-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_PVPANIC_PCI') ? ['pvpanic-pci-test'] : []) +          \
@@ -24187,6 +25057,7 @@ index 78b30106496367362132cbdbfa6c535983241759..8eb5c57e6e34ae216a2eef183c20bfa8
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-icm-tr-test'] : []) +                 \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-icm-icl-test'] : []) +                \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-harness-test'] : []) +                \
++  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-fault-test'] : []) +                  \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-asm4242-test'] : []) +               \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-asm2464-test'] : []) +               \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-tb3dev-test'] : []) +                \
@@ -25894,6 +26765,1004 @@ index 0000000000000000000000000000000000000000..a5a0ef89b56ced5c64b6ba5e6c9c2905
 +    qtest_add_func("/usb4-asm4242/switch-q35", test_switch_q35);
 +    qtest_add_func("/usb4-asm4242/switch-pc", test_switch_pc);
 +    qtest_add_func("/usb4-asm4242/acpi-dsd", test_acpi_dsd);
++    return g_test_run();
++}
+diff --git a/tests/qtest/usb4-fault-test.c b/tests/qtest/usb4-fault-test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..d5d24113f757aeb73ba8b97e9497d5712c4f719c
+--- /dev/null
++++ b/tests/qtest/usb4-fault-test.c
+@@ -0,0 +1,992 @@
++/*
++ * qtest for the usb4-host QMP fault injection (usb4-emu docs/FAULTS.md,
++ * roadmap M6): dropped, delayed and duplicated (stale) ring 0 replies,
++ * surprise removal by x-cable at a chosen moment (during enumeration,
++ * during NVMe I/O), injected host router and host interface resets, and
++ * ICM safe mode in the outbound mailbox.
++ *
++ * Copyright (c) 2026 usb4-emu contributors
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Written from scratch for the usb4-emu project. The ring 0 helpers are
++ * those of usb4-icm-test.c (polling only: no MSI, MSI-X or INTx).
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/bswap.h"
++#include "libqtest.h"
++#include "libqos/pci.h"
++#include "libqos/pci-pc.h"
++#include "libqos/malloc-pc.h"
++#include "hw/pci/pci_regs.h"
++#include "qobject/qdict.h"
++#include "qobject/qjson.h"
++#include "qapi/error.h"
++
++#define DEVFN                QPCI_DEVFN(4, 0)
++#define U4_PATH              "/machine/peripheral/u4"
++#define D0_PATH              "/machine/peripheral/d0"
++#define TP_PATH              "/machine/peripheral/tp0"
++#define TP_DEVFN             (3 << 3)
++
++/* BAR0 (Spec Table 12-10, ICM-PROTOCOL.md 2.1) */
++#define TX_RING(n)           (0x00000 + (n) * 0x10)
++#define RX_RING(n)           (0x08000 + (n) * 0x10)
++#define  RING_BASE_LO        0x0
++#define  RING_BASE_HI        0x4
++#define  RING_INDEX          0x8
++#define  RING_SIZE           0xc
++#define TX_CTRL(n)           (0x19800 + (n) * 0x20)
++#define RX_CTRL(n)           (0x29800 + (n) * 0x20)
++#define RX_PDF(n)            (0x29804 + (n) * 0x20)
++#define RING_VALID           (1u << 31)
++#define RING_RAW             (1u << 30)
++#define INMAIL_DATA          0x39900
++#define INMAIL_CMD           0x39904
++#define OUTMAIL              0x3990c
++
++#define PDF_READ             1
++#define PDF_WRITE            2
++#define PDF_HOTPLUG          5
++#define PDF_ICM_EVENT        10
++#define PDF_ICM_CMD          11
++#define PDF_ICM_RESP         12
++
++#define DESC_DD              (1u << 21)
++#define DESC_RS              (1u << 22)
++#define DESC_IE              (1u << 23)
++
++#define RING_N               16
++#define BUF_SIZE             256
++#define MS                   (1000 * 1000LL)
++
++typedef struct T {
++    QTestState *qts;
++    QPCIBus *bus;
++    QPCIDevice *dev;
++    QPCIBar bar;
++    QGuestAllocator alloc;
++    uint64_t tx_ring, rx_ring, tx_buf, rx_buf;
++    unsigned tx_pi, rx_ci, rx_next;
++    char *img;
++} T;
++
++static uint32_t rd(T *t, uint32_t off)
++{
++    return qpci_io_readl(t->dev, t->bar, off);
++}
++
++static void wr(T *t, uint32_t off, uint32_t v)
++{
++    qpci_io_writel(t->dev, t->bar, off, v);
++}
++
++/* q35, tunnel port tp0, usb4-host u4 (@host_opts), a device d0 or none */
++static T *t_start(const char *host_opts, const char *dev_opts,
++                  const char *extra)
++{
++    T *t = g_new0(T, 1);
++    int fd = g_file_open_tmp("usb4-fault-XXXXXX", &t->img, NULL);
++    uint8_t sec[512];
++    g_autofree char *dev = dev_opts ?
++        g_strdup_printf("-device usb4-device,id=d0,bus=u4.0,port=1,%s",
++                        dev_opts) : NULL;
++
++    g_assert(fd >= 0);
++    memset(sec, 0xa5, sizeof(sec));
++    g_assert(write(fd, sec, sizeof(sec)) == sizeof(sec));
++    g_assert(ftruncate(fd, 1024 * 1024) == 0);
++    close(fd);
++    t->qts = qtest_initf("-machine q35 "
++                         "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-"
++                         "support=off "
++                         "-drive if=none,id=disk0,file=%s,format=raw "
++                         "-device usb4-tunnel-port,id=tp0,bus=pcie.0,"
++                         "addr=0x3,chassis=1,settle-ms=200 "
++                         "-device usb4-host,id=u4,bus=pcie.0,addr=0x4,"
++                         "tunnel-port=tp0%s %s %s",
++                         t->img, host_opts ? host_opts : "",
++                         dev ? dev : "", extra ? extra : "");
++    pc_alloc_init(&t->alloc, t->qts, ALLOC_NO_FLAGS);
++    t->bus = qpci_new_pc(t->qts, &t->alloc);
++    t->dev = qpci_device_find(t->bus, DEVFN);
++    g_assert(t->dev);
++    qpci_device_enable(t->dev);
++    t->bar = qpci_iomap(t->dev, 0, NULL);
++    return t;
++}
++
++#define AR       ",profile=tb3-alpine-ridge"
++#define TB3_DEV  "dialect=tb3,drive=disk0,serial=QTFLT"
++
++static void t_stop(T *t)
++{
++    g_free(t->dev);
++    qpci_free_pc(t->bus);
++    alloc_destroy(&t->alloc);
++    qtest_quit(t->qts);
++    unlink(t->img);
++    g_free(t->img);
++    g_free(t);
++}
++
++static void qom_set_str(T *t, const char *path, const char *prop,
++                        const char *val)
++{
++    qtest_qmp_assert_success(t->qts, "{'execute': 'qom-set', 'arguments': "
++                             "{'path': %s, 'property': %s, 'value': %s}}",
++                             path, prop, val);
++}
++
++static void qom_set_bool(T *t, const char *path, const char *prop, bool val)
++{
++    qtest_qmp_assert_success(t->qts, "{'execute': 'qom-set', 'arguments': "
++                             "{'path': %s, 'property': %s, 'value': %i}}",
++                             path, prop, val);
++}
++
++/* qom-set that must fail; returns the error description */
++static char *qom_set_err(T *t, const char *path, const char *prop,
++                         const char *json_val)
++{
++    QObject *val = qobject_from_json(json_val, &error_abort);
++    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-set', 'arguments': "
++                           "{'path': %s, 'property': %s, 'value': %p}}",
++                           path, prop, val);
++    char *desc;
++
++    g_assert(qdict_haskey(rsp, "error"));
++    desc = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
++    g_test_message("qom-set %s=%s: %s", prop, json_val, desc);
++    qobject_unref(rsp);
++    return desc;
++}
++
++static char *qom_get_str(T *t, const char *path, const char *prop)
++{
++    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-get', 'arguments': "
++                           "{'path': %s, 'property': %s}}", path, prop);
++    char *s = g_strdup(qdict_get_str(rsp, "return"));
++
++    qobject_unref(rsp);
++    return s;
++}
++
++static bool qom_get_bool(T *t, const char *path, const char *prop)
++{
++    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-get', 'arguments': "
++                           "{'path': %s, 'property': %s}}", path, prop);
++    bool b = qdict_get_bool(rsp, "return");
++
++    qobject_unref(rsp);
++    return b;
++}
++
++static int64_t qom_get_int(T *t, const char *path, const char *prop)
++{
++    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-get', 'arguments': "
++                           "{'path': %s, 'property': %s}}", path, prop);
++    int64_t v = qdict_get_int(rsp, "return");
++
++    qobject_unref(rsp);
++    return v;
++}
++
++static bool state_has(T *t, const char *needle)
++{
++    g_autofree char *s = qom_get_str(t, U4_PATH, "x-reply-fault-state");
++
++    if (!strstr(s, needle)) {
++        g_test_message("x-reply-fault-state: %s (wanted %s)", s, needle);
++        return false;
++    }
++    return true;
++}
++
++/* USB4_REPLY_FAULT: returns the actions (caller frees) */
++static char *wait_fault(T *t, unsigned *pdf)
++{
++    QDict *ev = qtest_qmp_eventwait_ref(t->qts, "USB4_REPLY_FAULT");
++    QDict *data = qdict_get_qdict(ev, "data");
++    char *acts = g_strdup(qdict_get_str(data, "actions"));
++
++    g_assert_cmpstr(qdict_get_str(data, "qom-path"), ==, U4_PATH);
++    if (pdf) {
++        *pdf = qdict_get_int(data, "pdf");
++    }
++    qobject_unref(ev);
++    return acts;
++}
++
++static void wait_stage(T *t, const char *stage)
++{
++    for (;;) {
++        QDict *ev = qtest_qmp_eventwait_ref(t->qts, "USB4_TUNNEL_ENDPOINT");
++        bool match = !strcmp(qdict_get_str(qdict_get_qdict(ev, "data"),
++                                           "stage"), stage);
++
++        qobject_unref(ev);
++        if (match) {
++            return;
++        }
++    }
++}
++
++static bool gate_open(T *t)
++{
++    g_autofree char *st = qom_get_str(t, TP_PATH, "endpoint");
++
++    return strstr(st, "gate=open") != NULL;
++}
++
++/* ---- ring 0, raw mode ---- */
++
++static void desc_write(T *t, uint64_t ring, unsigned i, uint64_t addr,
++                       uint32_t dw2)
++{
++    uint64_t d = ring + i * 16;
++
++    qtest_writel(t->qts, d, (uint32_t)addr);
++    qtest_writel(t->qts, d + 4, addr >> 32);
++    qtest_writel(t->qts, d + 8, dw2);
++    qtest_writel(t->qts, d + 12, 0);
++}
++
++static void rx_post(T *t, unsigned n)
++{
++    while (n--) {
++        desc_write(t, t->rx_ring, t->rx_ci, t->rx_buf + t->rx_ci * BUF_SIZE,
++                   DESC_RS | DESC_IE);
++        t->rx_ci = (t->rx_ci + 1) % RING_N;
++    }
++    wr(t, RX_RING(0) + RING_INDEX, t->rx_ci);
++}
++
++static void rings_setup(T *t)
++{
++    if (!t->tx_ring) {
++        t->tx_ring = guest_alloc(&t->alloc, RING_N * 16);
++        t->rx_ring = guest_alloc(&t->alloc, RING_N * 16);
++        t->tx_buf = guest_alloc(&t->alloc, RING_N * BUF_SIZE);
++        t->rx_buf = guest_alloc(&t->alloc, RING_N * BUF_SIZE);
++    }
++    t->tx_pi = t->rx_ci = t->rx_next = 0;
++    wr(t, TX_RING(0) + RING_BASE_LO, (uint32_t)t->tx_ring);
++    wr(t, TX_RING(0) + RING_BASE_HI, t->tx_ring >> 32);
++    wr(t, TX_RING(0) + RING_SIZE, RING_N);
++    wr(t, TX_CTRL(0), RING_VALID | RING_RAW);
++    wr(t, RX_RING(0) + RING_BASE_LO, (uint32_t)t->rx_ring);
++    wr(t, RX_RING(0) + RING_BASE_HI, t->rx_ring >> 32);
++    wr(t, RX_RING(0) + RING_SIZE, RING_N | (BUF_SIZE << 16));
++    wr(t, RX_PDF(0), 0xffffffff);
++    wr(t, RX_CTRL(0), RING_VALID | RING_RAW);
++    rx_post(t, RING_N - 1);
++}
++
++static uint32_t crc32c(const uint8_t *p, size_t n)
++{
++    uint32_t c = 0xffffffff;
++
++    while (n--) {
++        c ^= *p++;
++        for (int b = 0; b < 8; b++) {
++            c = (c >> 1) ^ ((c & 1) ? 0x82f63b78 : 0);
++        }
++    }
++    return ~c;
++}
++
++static void tx_frame(T *t, unsigned pdf, const uint32_t *w, unsigned n)
++{
++    uint8_t buf[BUF_SIZE];
++    uint64_t b = t->tx_buf + t->tx_pi * BUF_SIZE;
++
++    for (unsigned i = 0; i < n; i++) {
++        stl_be_p(buf + 4 * i, w[i]);
++    }
++    stl_be_p(buf + 4 * n, crc32c(buf, 4 * n));
++    qtest_memwrite(t->qts, b, buf, 4 * n + 4);
++    desc_write(t, t->tx_ring, t->tx_pi, b,
++               (4 * n + 4) | (pdf << 12) | DESC_RS | DESC_IE);
++    t->tx_pi = (t->tx_pi + 1) % RING_N;
++    wr(t, TX_RING(0) + RING_INDEX, t->tx_pi << 16);
++}
++
++/* The next received frame: its PDF and words; 0 if none arrived. */
++static unsigned rx_recv(T *t, uint32_t *w, unsigned *n)
++{
++    unsigned i = t->rx_next, len, pdf;
++    uint32_t dw2;
++    uint8_t buf[BUF_SIZE];
++
++    if (((rd(t, RX_RING(0) + RING_INDEX) >> 16) & 0xffff) == i) {
++        return 0;
++    }
++    dw2 = qtest_readl(t->qts, t->rx_ring + i * 16 + 8);
++    g_assert_cmphex(dw2 & DESC_DD, ==, DESC_DD);
++    len = dw2 & 0xfff;
++    pdf = (dw2 >> 12) & 0xf;
++    g_assert_cmpuint(len, >=, 8);
++    qtest_memread(t->qts, t->rx_buf + i * BUF_SIZE, buf, len);
++    g_assert_cmphex(crc32c(buf, len - 4), ==,
++                    (uint32_t)ldl_be_p(buf + len - 4));
++    *n = len / 4 - 1;
++    for (unsigned k = 0; k < *n; k++) {
++        w[k] = (uint32_t)ldl_be_p(buf + 4 * k);
++    }
++    t->rx_next = (i + 1) % RING_N;
++    rx_post(t, 1);
++    return pdf;
++}
++
++static void tx_frame(T *t, unsigned pdf, const uint32_t *w, unsigned n);
++
++/* Acknowledge a hot plug event (Spec 6.8, Table 6-12; usb4-tb3dev-test) */
++static void hp_ack(T *t, const uint32_t *w)
++{
++    uint32_t a[3] = {
++        w[0] & 0x7fffffffu, w[1],
++        7 | ((w[2] & 0x3f) << 8) | ((w[2] >> 31 ? 3u : 2u) << 30),
++    };
++
++    tx_frame(t, 3, a, 3);
++}
++
++/* As rx_recv(), acknowledging and skipping hot plug events */
++static unsigned rx_recv_nohp(T *t, uint32_t *w, unsigned *n)
++{
++    unsigned pdf;
++
++    while ((pdf = rx_recv(t, w, n)) == PDF_HOTPLUG) {
++        hp_ack(t, w);
++    }
++    return pdf;
++}
++
++static unsigned expect(T *t, unsigned pdf, uint32_t *w)
++{
++    unsigned n = 0, got = rx_recv(t, w, &n);
++
++    g_assert_cmpuint(got, ==, pdf);
++    return n;
++}
++
++static void expect_none(T *t)
++{
++    uint32_t w[64];
++    unsigned n;
++
++    g_assert_cmpuint(rx_recv(t, w, &n), ==, 0);
++}
++
++/* Run the main loop (bottom halves, timers) for @ms of virtual time */
++static void step(T *t, int64_t ms)
++{
++    qtest_clock_step(t->qts, ms * MS);
++}
++
++static uint32_t mailbox(T *t, uint8_t cmd)
++{
++    wr(t, INMAIL_DATA, 0);
++    wr(t, INMAIL_CMD, (1u << 31) | cmd);
++    return rd(t, INMAIL_CMD);
++}
++
++/* ICM-PROTOCOL.md 6.1 up to sending driver-ready; no response read */
++static void icm_bind_send(T *t)
++{
++    uint32_t dr = 0x00000003;
++
++    rings_setup(t);
++    g_assert_cmphex(mailbox(t, 0x23), ==, 0x23);
++    tx_frame(t, PDF_ICM_CMD, &dr, 1);
++}
++
++static void expect_driver_ready(T *t)
++{
++    uint32_t w[64];
++
++    g_assert_cmpuint(expect(t, PDF_ICM_RESP, w), ==, 2);
++    g_assert_cmphex(w[0] & 0xff, ==, 0x03);
++}
++
++/* Control packet read request (Spec Table 6-2) */
++static void ctl_read_send(T *t, uint64_t route, unsigned cs, unsigned adp,
++                          unsigned off, unsigned n)
++{
++    uint32_t f[3] = {
++        route >> 32, (uint32_t)route,
++        off | (n << 13) | (adp << 19) | (cs << 25),
++    };
++
++    tx_frame(t, PDF_READ, f, 3);
++}
++
++/* Blocking read of @n dwords (hot plug events skipped, not acked) */
++static void ctl_read(T *t, uint64_t route, unsigned cs, unsigned adp,
++                     unsigned off, unsigned n, uint32_t *out)
++{
++    uint32_t w[64];
++    unsigned got;
++
++    ctl_read_send(t, route, cs, adp, off, n);
++    g_assert_cmpuint(rx_recv_nohp(t, w, &got), ==, PDF_READ);
++    g_assert_cmpuint(got, ==, 3 + n);
++    memcpy(out, &w[3], 4 * n);
++}
++
++static void ctl_write(T *t, uint64_t route, unsigned cs, unsigned adp,
++                      unsigned off, unsigned n, const uint32_t *in)
++{
++    uint32_t f[3 + 16], w[64];
++    unsigned got;
++
++    f[0] = route >> 32;
++    f[1] = (uint32_t)route;
++    f[2] = off | (n << 13) | (adp << 19) | (cs << 25);
++    memcpy(&f[3], in, 4 * n);
++    tx_frame(t, PDF_WRITE, f, 3 + n);
++    g_assert_cmpuint(rx_recv_nohp(t, w, &got), ==, PDF_WRITE);
++}
++
++/*
++ * Software CM first steps (usb4-tb3dev-test.c host_enumerate and
++ * tb3_configure): host router configured, host lane adapter 1 unlocked,
++ * so the device router behind it answers at route 1.
++ */
++static void sw_cm_start(T *t)
++{
++    uint32_t v[4];
++
++    ctl_read(t, 0, 2, 0, 1, 4, v);
++    v[2] |= 1u << 31;
++    v[3] = (v[3] & ~0xff00u) | 0x1000;
++    ctl_write(t, 0, 2, 0, 1, 4, v);
++    ctl_read(t, 0, 1, 1, 4, 1, v);
++    v[0] &= ~(1u << 31);
++    ctl_write(t, 0, 1, 1, 4, 1, v);
++    step(t, 20);
++}
++
++/* ---- tests ---- */
++
++/*
++ * Dropped, delayed and duplicated ICM responses (Alpine Ridge firmware
++ * CM): a dropped driver-ready response never comes and the next one
++ * does; a delayed one comes after its delay in virtual time; a dup
++ * comes now and again (stale) after the delay.
++ */
++static void test_icm_drop_delay_dup(void)
++{
++    T *t = t_start(AR ",x-reply-faults=\"pdf=icm-resp code=3 act=drop\"",
++                   NULL, NULL);
++    g_autofree char *acts = NULL;
++    unsigned pdf;
++    uint32_t dr = 0x00000003;
++
++    /* dropped */
++    icm_bind_send(t);
++    acts = wait_fault(t, &pdf);
++    g_assert_cmpstr(acts, ==, "drop");
++    g_assert_cmpuint(pdf, ==, PDF_ICM_RESP);
++    step(t, 1000);
++    expect_none(t);
++    g_assert(state_has(t, "rule0=1/1 dropped=1 delayed=0 pending=0"));
++    /* one-shot: the retry is answered */
++    tx_frame(t, PDF_ICM_CMD, &dr, 1);
++    expect_driver_ready(t);
++    g_assert(state_has(t, "rule0=2/1 "));
++
++    /* delayed by 500 ms */
++    qom_set_str(t, U4_PATH, "x-reply-faults",
++                "pdf=icm-resp code=3 act=delay delay=500");
++    tx_frame(t, PDF_ICM_CMD, &dr, 1);
++    expect_none(t);
++    g_assert(state_has(t, "pending=1"));
++    step(t, 499);
++    expect_none(t);
++    step(t, 1);
++    expect_driver_ready(t);
++    g_assert(state_has(t, "rule0=1/1 dropped=1 delayed=1 pending=0"));
++
++    /* duplicated: now, and a stale copy 300 ms later */
++    qom_set_str(t, U4_PATH, "x-reply-faults",
++                "pdf=icm-resp code=3 act=dup delay=300");
++    tx_frame(t, PDF_ICM_CMD, &dr, 1);
++    expect_driver_ready(t);
++    expect_none(t);
++    step(t, 300);
++    expect_driver_ready(t);
++    expect_none(t);
++
++    /* repeat=on from nth=2: the 1st passes, the 2nd and 3rd drop */
++    qom_set_str(t, U4_PATH, "x-reply-faults",
++                "pdf=icm-resp nth=2 repeat=on act=drop");
++    tx_frame(t, PDF_ICM_CMD, &dr, 1);
++    expect_driver_ready(t);
++    tx_frame(t, PDF_ICM_CMD, &dr, 1);
++    tx_frame(t, PDF_ICM_CMD, &dr, 1);
++    expect_none(t);
++    g_assert(state_has(t, "rule0=3/2 "));
++    /* rules cleared: back to normal */
++    qom_set_str(t, U4_PATH, "x-reply-faults", "");
++    tx_frame(t, PDF_ICM_CMD, &dr, 1);
++    expect_driver_ready(t);
++    t_stop(t);
++}
++
++/* A delayed reply is lost in a host interface reset, not delivered */
++static void test_delay_vs_reset(void)
++{
++    T *t = t_start(AR ",x-reply-faults=\"pdf=icm-resp act=delay "
++                   "delay=200\"", NULL, NULL);
++
++    icm_bind_send(t);
++    g_assert(state_has(t, "pending=1"));
++    qom_set_str(t, U4_PATH, "x-host-reset", "interface");
++    g_assert(state_has(t, "pending=0 resets=router:0,interface:1"));
++    /* the reset disabled the rings */
++    g_assert_cmphex(rd(t, TX_CTRL(0)), ==, 0);
++    g_assert_cmphex(rd(t, RX_CTRL(0)), ==, 0);
++    step(t, 1000);
++    rings_setup(t);
++    expect_none(t);
++    t_stop(t);
++}
++
++/*
++ * Injected host resets: a QMP reset, then one fired by a rule when the
++ * driver-ready response is queued (the response is delivered, then the
++ * bottom half resets the host and the rings read disabled).
++ */
++static void test_host_reset(void)
++{
++    T *t = t_start(AR, NULL, NULL);
++    g_autofree char *cnt = NULL, *err = NULL, *acts = NULL;
++    int i;
++
++    icm_bind_send(t);
++    expect_driver_ready(t);
++    qom_set_str(t, U4_PATH, "x-host-reset", "router");
++    g_assert_cmphex(rd(t, TX_CTRL(0)), ==, 0);
++    g_assert_cmphex(rd(t, RX_CTRL(0)), ==, 0);
++    cnt = qom_get_str(t, U4_PATH, "x-host-reset");
++    g_assert_cmpstr(cnt, ==, "router=1 interface=0");
++    err = qom_set_err(t, U4_PATH, "x-host-reset", "'everything'");
++    g_assert(strstr(err, "router or interface"));
++    /* the firmware CM came back: a new bind is answered */
++    icm_bind_send(t);
++    expect_driver_ready(t);
++
++    qom_set_str(t, U4_PATH, "x-reply-faults",
++                "pdf=icm-resp code=3 act=host-reset");
++    rings_setup(t);
++    {
++        uint32_t dr = 0x00000003;
++
++        tx_frame(t, PDF_ICM_CMD, &dr, 1);
++    }
++    acts = wait_fault(t, NULL);
++    g_assert_cmpstr(acts, ==, "host-reset");
++    for (i = 0; i < 100 && rd(t, RX_CTRL(0)); i++) {
++        step(t, 1);
++    }
++    g_assert_cmphex(rd(t, RX_CTRL(0)), ==, 0);
++    /* the response landed in descriptor 0 before the reset */
++    g_assert_cmphex(qtest_readl(t->qts, t->rx_ring + 8) &
++                    (DESC_DD | 0xf000 | 0xfff), ==,
++                    DESC_DD | (PDF_ICM_RESP << 12) | 12);
++    g_assert(state_has(t, "resets=router:2,interface:0"));
++    t_stop(t);
++}
++
++/* ICM safe mode: operating mode 0 in outbound mailbox bits 11:8 (2.3) */
++static void test_icm_safe_mode(void)
++{
++    T *t = t_start(AR, NULL, NULL);
++    g_autofree char *err = NULL;
++
++    /* default unchanged: connection manager mode, as captured */
++    g_assert_cmphex(rd(t, OUTMAIL), ==, 0x800003f0);
++    g_assert_cmpint(qom_get_int(t, U4_PATH, "x-icm-mode"), ==, 3);
++    qtest_qmp_assert_success(t->qts, "{'execute': 'qom-set', 'arguments': "
++                             "{'path': %s, 'property': 'x-icm-mode', "
++                             "'value': 0}}", U4_PATH);
++    g_assert_cmphex(rd(t, OUTMAIL), ==, 0x800000f0);
++    err = qom_set_err(t, U4_PATH, "x-icm-mode", "16");
++    g_assert(strstr(err, "0..15"));
++    g_assert_cmphex(rd(t, OUTMAIL), ==, 0x800000f0);
++    t_stop(t);
++
++    /* set on the command line: safe mode from power-on */
++    t = t_start(AR ",x-icm-mode=0", NULL, NULL);
++    g_assert_cmphex((rd(t, OUTMAIL) >> 8) & 0xf, ==, 0);
++    t_stop(t);
++}
++
++/*
++ * Surprise removal during enumeration under the firmware CM: the
++ * device-connected event for the router is dropped and the cable pulled
++ * in the same moment, so the guest only hears of it going; the router
++ * is gone (x-attached off). Putting the cable back announces it again.
++ */
++static void test_icm_unplug_enum(void)
++{
++    T *t = t_start(AR ",x-reply-faults=\"pdf=icm-event code=3 "
++                   "act=drop+unplug dev=d0\"", TB3_DEV, NULL);
++    g_autofree char *acts = NULL;
++    uint32_t w[64];
++    unsigned n;
++    int i;
++
++    g_assert_true(qom_get_bool(t, D0_PATH, "x-attached"));
++    g_assert_true(qom_get_bool(t, D0_PATH, "x-cable"));
++    icm_bind_send(t);
++    expect_driver_ready(t);
++    acts = wait_fault(t, NULL);
++    g_assert_cmpstr(acts, ==, "drop+unplug");
++    for (i = 0; i < 100 && qom_get_bool(t, D0_PATH, "x-attached"); i++) {
++        step(t, 1);
++    }
++    g_assert_false(qom_get_bool(t, D0_PATH, "x-attached"));
++    g_assert_false(qom_get_bool(t, D0_PATH, "x-cable"));
++    /*
++     * The firmware CM announced the router (the guest lost that event)
++     * and now reports it gone: the guest sees a device-disconnected for
++     * a connection it never heard of, then nothing.
++     */
++    step(t, 100);
++    g_assert_cmpuint(expect(t, PDF_ICM_EVENT, w), ==, 2);
++    g_assert_cmphex(w[0] & 0xff, ==, 0x04);
++    g_assert_cmphex(w[1], ==, 0x00110000);
++    expect_none(t);
++
++    /* cable back: device connected (the rule was one-shot) */
++    qom_set_bool(t, D0_PATH, "x-cable", true);
++    g_assert_true(qom_get_bool(t, D0_PATH, "x-attached"));
++    for (i = 0; i < 100 && !rx_recv(t, w, &n); i++) {
++        step(t, 10);
++    }
++    g_assert_cmpuint(i, <, 100);
++    g_assert_cmphex(w[0] & 0xff, ==, 0x03);
++    g_assert_cmpuint(n, ==, 61);
++    t_stop(t);
++}
++
++/* ---- NVMe behind the tunnel, for the during-I/O case ---- */
++
++#define WIN_MEM      0xe8000000ull
++#define WIN_MEM_REG  0xe800e800u
++#define NVME_CC      0x14
++#define NVME_CSTS    0x1c
++#define NVME_AQA     0x24
++#define NVME_ASQ     0x28
++#define NVME_ACQ     0x30
++#define QSIZE        16
++#define RAM_ASQ      0x1000000ull
++#define RAM_ACQ      0x1001000ull
++#define RAM_SQ1      0x1002000ull
++#define RAM_CQ1      0x1003000ull
++#define RAM_BUF      0x1010000ull
++
++static uint32_t cfg_addr(int bus, int devfn, int off)
++{
++    return 0x80000000u | (bus << 16) | (devfn << 8) | (off & 0xfc);
++}
++
++static uint32_t cfg_readl(T *t, int bus, int devfn, int off)
++{
++    qtest_outl(t->qts, 0xcf8, cfg_addr(bus, devfn, off));
++    return qtest_inl(t->qts, 0xcfc);
++}
++
++static void cfg_writel(T *t, int bus, int devfn, int off, uint32_t val)
++{
++    qtest_outl(t->qts, 0xcf8, cfg_addr(bus, devfn, off));
++    qtest_outl(t->qts, 0xcfc, val);
++}
++
++/* CQE for @cid of queue @q at @head with phase 1, waited for (bounded) */
++static bool nvme_cqe(T *t, uint64_t cq, unsigned head, unsigned cid,
++                     int tries)
++{
++    for (int i = 0; i < tries; i++) {
++        uint32_t dw3 = qtest_readl(t->qts, cq + head * 16 + 12);
++
++        if ((dw3 >> 16) & 1) {
++            g_assert_cmpuint(dw3 & 0xffff, ==, cid);
++            g_assert_cmphex(dw3 >> 17, ==, 0);
++            return true;
++        }
++        g_usleep(1000);
++    }
++    return false;
++}
++
++static void nvme_submit(T *t, uint64_t sq, unsigned qid, unsigned tail,
++                        const uint32_t *sqe)
++{
++    qtest_memwrite(t->qts, sq + tail * 64, sqe, 64);
++    qtest_writel(t->qts, WIN_MEM + 0x1000 + qid * 8, tail + 1);
++}
++
++/* Admin queues, I/O queue pair 1, polled (CQ interrupts off) */
++static void nvme_bringup(T *t)
++{
++    uint32_t sqe[16] = { 0 };
++
++    qtest_memset(t->qts, RAM_ASQ, 0, 0x4000);
++    qtest_writel(t->qts, WIN_MEM + NVME_AQA, ((QSIZE - 1) << 16) | (QSIZE - 1));
++    qtest_writeq(t->qts, WIN_MEM + NVME_ASQ, RAM_ASQ);
++    qtest_writeq(t->qts, WIN_MEM + NVME_ACQ, RAM_ACQ);
++    qtest_writel(t->qts, WIN_MEM + NVME_CC, 0x00460001);
++    for (int i = 0; i < 2000 &&
++         !(qtest_readl(t->qts, WIN_MEM + NVME_CSTS) & 1); i++) {
++        g_usleep(1000);
++    }
++    g_assert_cmphex(qtest_readl(t->qts, WIN_MEM + NVME_CSTS), ==, 1);
++    /* create I/O CQ 1 (polled), then SQ 1 */
++    sqe[0] = 0x05 | (1u << 16);
++    sqe[6] = (uint32_t)RAM_CQ1;
++    sqe[10] = ((QSIZE - 1) << 16) | 1;
++    sqe[11] = 0x1;
++    nvme_submit(t, RAM_ASQ, 0, 0, sqe);
++    g_assert(nvme_cqe(t, RAM_ACQ, 0, 1, 2000));
++    memset(sqe, 0, sizeof(sqe));
++    sqe[0] = 0x01 | (2u << 16);
++    sqe[6] = (uint32_t)RAM_SQ1;
++    sqe[10] = ((QSIZE - 1) << 16) | 1;
++    sqe[11] = (1u << 16) | 1;
++    nvme_submit(t, RAM_ASQ, 0, 1, sqe);
++    g_assert(nvme_cqe(t, RAM_ACQ, 1, 2, 2000));
++}
++
++/*
++ * Surprise removal during I/O under the firmware CM: an approved tunnel,
++ * an NVMe read held by the tunnel port's harness (fetched, not
++ * completed, docs/HARNESS.md), then the cable pulled with x-cable. The
++ * gate closes in that call, the guest gets device-disconnected, the read
++ * never completes, and the replug announces the device again.
++ */
++static void test_icm_unplug_io(void)
++{
++    T *t = t_start(AR, TB3_DEV, NULL);
++    uint32_t w[64], cmd[6], uuid[4], sqe[16] = { 0 };
++    unsigned n, id;
++    int exp, i;
++
++    icm_bind_send(t);
++    expect_driver_ready(t);
++    n = expect(t, PDF_ICM_EVENT, w);
++    g_assert_cmpuint(n, ==, 61);
++    memcpy(uuid, &w[1], 16);
++    id = (w[5] >> 8) & 0xff;
++    cmd[0] = 0x00000004;
++    memcpy(&cmd[1], uuid, 16);
++    cmd[5] = 0x10 | (id << 8);
++    tx_frame(t, PDF_ICM_CMD, cmd, 6);
++    g_assert_cmpuint(expect(t, PDF_ICM_RESP, w), ==, 6);
++    g_assert_cmphex(w[0], ==, 0x01000004);
++    g_assert_true(gate_open(t));
++    wait_stage(t, "inserted");
++
++    /* tp0: bus 1, memory window, the NVMe's BAR0 in it */
++    cfg_writel(t, 0, TP_DEVFN, 0x18, 0x00010100);
++    cfg_writel(t, 0, TP_DEVFN, 0x20, WIN_MEM_REG);
++    cfg_writel(t, 0, TP_DEVFN, 0x04, 0x0006);
++    /* PCI Express capability: Slot Control, power on (as HARNESS.md) */
++    exp = cfg_readl(t, 0, TP_DEVFN, 0x34) & 0xfc;
++    while (exp && (cfg_readl(t, 0, TP_DEVFN, exp) & 0xff) != 0x10) {
++        exp = (cfg_readl(t, 0, TP_DEVFN, exp) >> 8) & 0xfc;
++    }
++    g_assert_cmpint(exp, !=, 0);
++    cfg_writel(t, 0, TP_DEVFN, exp + 0x18, 0x0100);
++    cfg_writel(t, 1, 0, 0x10, (uint32_t)WIN_MEM);
++    cfg_writel(t, 1, 0, 0x14, WIN_MEM >> 32);
++    cfg_writel(t, 1, 0, 0x04, 0x0006);
++    nvme_bringup(t);
++
++    /* a read, held at fetch */
++    qom_set_str(t, TP_PATH, "x-faults", "at=fetch op=read act=hold");
++    qtest_memset(t->qts, RAM_BUF, 0x5a, 512);
++    sqe[0] = 0x02 | (7u << 16);
++    sqe[1] = 1;
++    sqe[6] = (uint32_t)RAM_BUF;
++    nvme_submit(t, RAM_SQ1, 1, 0, sqe);
++    for (i = 0; i < 2000; i++) {
++        g_autofree char *held = qom_get_str(t, TP_PATH, "x-release");
++
++        if (*held) {
++            break;
++        }
++        g_usleep(1000);
++    }
++    g_assert_cmpint(i, <, 2000);
++
++    /* the cable is pulled while the read is in flight */
++    qom_set_bool(t, D0_PATH, "x-cable", false);
++    g_assert_false(gate_open(t));
++    g_assert_false(qom_get_bool(t, D0_PATH, "x-attached"));
++    g_assert_cmphex(qtest_readl(t->qts, WIN_MEM + NVME_CSTS), ==,
++                    0xffffffff);
++    n = expect(t, PDF_ICM_EVENT, w);
++    g_assert_cmpuint(n, ==, 2);
++    g_assert_cmphex(w[0] & 0xff, ==, 0x04);         /* disconnected */
++    g_assert_cmphex(w[1], ==, 0x00110000);
++    wait_stage(t, "removed");
++    g_assert(!nvme_cqe(t, RAM_CQ1, 0, 7, 50));
++    g_assert(qtest_readb(t->qts, RAM_BUF) == 0x5a);
++
++    /* replug: announced again, not approved (a new connection) */
++    qom_set_bool(t, D0_PATH, "x-cable", true);
++    for (i = 0; i < 100 && !rx_recv(t, w, &n); i++) {
++        step(t, 10);
++    }
++    g_assert_cmpuint(i, <, 100);
++    g_assert_cmphex(w[0] & 0xff, ==, 0x03);
++    g_assert_false(gate_open(t));
++    t_stop(t);
++}
++
++/*
++ * Generic profile (software CM): a dropped read response to one route,
++ * then a surprise removal during enumeration: the read of the device
++ * router at route 1 is dropped and the cable pulled, so the CM gets no
++ * answer and a hot unplug event from the host router's lane adapter.
++ */
++static void test_generic_drop_unplug(void)
++{
++    T *t = t_start(",x-reply-faults=\"pdf=read route=0 nth=2 act=drop\"",
++                   TB3_DEV, NULL);
++    g_autofree char *acts = NULL;
++    uint32_t w[64];
++    unsigned n, pdf;
++    int i;
++    bool unplug = false;
++
++    rings_setup(t);
++    ctl_read_send(t, 0, 2, 0, 0, 1);
++    g_assert_cmpuint(rx_recv_nohp(t, w, &n), ==, PDF_READ);
++    ctl_read_send(t, 0, 2, 0, 0, 1);
++    step(t, 10);
++    g_assert_cmpuint(rx_recv_nohp(t, w, &n), ==, 0);
++    acts = wait_fault(t, &pdf);
++    g_assert_cmpstr(acts, ==, "drop");
++    g_assert_cmpuint(pdf, ==, PDF_READ);
++    g_free(acts);
++    ctl_read_send(t, 0, 2, 0, 0, 1);
++    g_assert_cmpuint(rx_recv_nohp(t, w, &n), ==, PDF_READ);
++    g_assert(state_has(t, "rule0=3/1 dropped=1"));
++
++    /* the device router answers at route 1 ... */
++    sw_cm_start(t);
++    ctl_read_send(t, 1, 2, 0, 0, 1);
++    g_assert_cmpuint(rx_recv_nohp(t, w, &n), ==, PDF_READ);
++    g_assert_cmphex(w[1], ==, 1);
++    /* ... until it is pulled while the CM reads it */
++    qom_set_str(t, U4_PATH, "x-reply-faults",
++                "pdf=read route=1 act=drop+unplug dev=d0");
++    ctl_read_send(t, 1, 2, 0, 1, 1);
++    acts = wait_fault(t, &pdf);
++    g_assert_cmpstr(acts, ==, "drop+unplug");
++    g_assert_cmpuint(pdf, ==, PDF_READ);
++    for (i = 0; i < 100 && !unplug; i++) {
++        step(t, 5);
++        while ((pdf = rx_recv(t, w, &n))) {
++            g_assert_cmpuint(pdf, ==, PDF_HOTPLUG);
++            hp_ack(t, w);
++            /* host router (route 0), unplug bit 31 */
++            if (!(w[0] & 0x7fffffffu) && !w[1] && (w[2] >> 31)) {
++                unplug = true;
++            }
++        }
++    }
++    g_assert_true(unplug);
++    g_assert_false(qom_get_bool(t, D0_PATH, "x-attached"));
++    g_assert(state_has(t, "rule0=1/1 dropped=2"));
++
++    /* cable back: once unlocked again, the router answers at route 1 */
++    qom_set_bool(t, D0_PATH, "x-cable", true);
++    g_assert_true(qom_get_bool(t, D0_PATH, "x-attached"));
++    step(t, 20);
++    sw_cm_start(t);
++    ctl_read_send(t, 1, 2, 0, 0, 1);
++    g_assert_cmpuint(rx_recv_nohp(t, w, &n), ==, PDF_READ);
++    t_stop(t);
++}
++
++/* A replug rule, and a cable already out at start-up */
++static void test_cable_props(void)
++{
++    T *t = t_start(AR, TB3_DEV ",x-cable=off", NULL);
++    uint32_t w[64];
++    unsigned n;
++    int i;
++
++    g_assert_false(qom_get_bool(t, D0_PATH, "x-attached"));
++    /* the driver-ready response puts the cable in (bottom half) */
++    qom_set_str(t, U4_PATH, "x-reply-faults",
++                "pdf=icm-resp code=3 act=replug dev=d0");
++    icm_bind_send(t);
++    expect_driver_ready(t);
++    for (i = 0; i < 100 && !rx_recv(t, w, &n); i++) {
++        step(t, 10);
++    }
++    g_assert_cmpuint(i, <, 100);
++    g_assert_cmphex(w[0] & 0xff, ==, 0x03);
++    g_assert_true(qom_get_bool(t, D0_PATH, "x-attached"));
++    /* idempotent */
++    qom_set_bool(t, D0_PATH, "x-cable", true);
++    g_assert_true(qom_get_bool(t, D0_PATH, "x-attached"));
++    t_stop(t);
++}
++
++/* Malformed rules are refused and leave the previous ones in force */
++static void test_bad_rules(void)
++{
++    static const char *const bad[] = {
++        "'act=explode'",
++        "'pdf=read'",
++        "'pdf=bogus act=drop'",
++        "'pdf=16 act=drop'",
++        "'act=unplug'",
++        "'act=delay'",
++        "'pdf=icm-resp route=1 act=drop'",
++        "'nth=0 act=drop'",
++        "'color=red act=drop'",
++        "'act=drop;act=bogus'",
++        "'drop'",
++    };
++    T *t = t_start(NULL, NULL, NULL);
++    g_autofree char *cur = NULL;
++
++    qom_set_str(t, U4_PATH, "x-reply-faults", "pdf=write act=drop");
++    for (unsigned i = 0; i < ARRAY_SIZE(bad); i++) {
++        g_autofree char *err = qom_set_err(t, U4_PATH, "x-reply-faults",
++                                           bad[i]);
++
++        g_assert(strstr(err, "x-reply-faults"));
++    }
++    cur = qom_get_str(t, U4_PATH, "x-reply-faults");
++    g_assert_cmpstr(cur, ==, "pdf=write act=drop");
++    g_assert(state_has(t, "rule0=0/0 dropped=0"));
++    t_stop(t);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++
++    qtest_add_func("/usb4-fault/icm-drop-delay-dup", test_icm_drop_delay_dup);
++    qtest_add_func("/usb4-fault/delay-vs-reset", test_delay_vs_reset);
++    qtest_add_func("/usb4-fault/host-reset", test_host_reset);
++    qtest_add_func("/usb4-fault/icm-safe-mode", test_icm_safe_mode);
++    qtest_add_func("/usb4-fault/icm-unplug-enum", test_icm_unplug_enum);
++    qtest_add_func("/usb4-fault/icm-unplug-io", test_icm_unplug_io);
++    qtest_add_func("/usb4-fault/generic-drop-unplug",
++                   test_generic_drop_unplug);
++    qtest_add_func("/usb4-fault/cable-props", test_cable_props);
++    qtest_add_func("/usb4-fault/bad-rules", test_bad_rules);
++
 +    return g_test_run();
 +}
 diff --git a/tests/qtest/usb4-harness-test.c b/tests/qtest/usb4-harness-test.c

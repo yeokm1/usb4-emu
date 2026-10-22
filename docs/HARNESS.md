@@ -17,6 +17,10 @@ driver never treats them as evidence (PLAN 0.0). See
 [Exact-point and event-following tests](#exact-point-and-event-following-tests)
 for what "synchronous" guarantees and what it does not.
 
+Faults on the connection manager side (dropped, delayed or stale ring 0 replies, a cable
+pulled at a chosen moment, host resets, ICM safe mode) are on `usb4-host` and
+`usb4-device` instead: [FAULTS.md](FAULTS.md).
+
 Code: `hw/usb4/usb4-harness.c`, `hw/usb4/usb4-debug-port.c`, the gate
 override in `hw/usb4/usb4-tunnel-slot.c`, and a small hook in QEMU's
 NVMe model (`include/hw/nvme/nvme-test-hook.h`, marked "usb4-emu test

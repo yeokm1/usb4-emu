@@ -296,6 +296,39 @@ The emulator has a test harness (when merged; see [HARNESS.md](HARNESS.md)): fau
 an exact NVMe command, gate overrides, controller timing faults, lost interrupts, a debug
 I/O port for stage markers, and namespace layouts (`nvme-nn` stops stornvme's 256
 phantom disks).
+
+For the CM side there is QMP fault injection ([FAULTS.md](FAULTS.md), QEMU `f381f01`,
+branch `fault-inject`, 2026-10-22): ring 0 replies dropped, delayed or duplicated (a
+stale copy later), a cable pulled at a chosen moment, host router or host interface
+resets the driver did not ask for, and ICM safe mode in the mailbox. How xHCI98's legs
+use it, from the kit's QMP client (`qmp.py cmd qom-set '{...}'`):
+
+- Unsafe unplug (task 43.21): `qom-set` the device's `x-cable` to `false` while a copy or
+  a directory listing runs; `true` re-plugs the same enclosure. For a pull while a
+  specific NVMe command is in flight, first hold it with the tunnel bridge's
+  `x-faults="at=fetch op=read act=hold"` and pull once `x-release` shows a token. Unlike
+  `device_del` the drive stays attached to QEMU, so no `drive-ensure` is needed after.
+- Unplug during enumeration: on `u4`, `x-reply-faults` = `pdf=icm-event code=3
+  act=drop+unplug dev=enc0` (firmware CM: the device-connected event lost, the
+  enclosure gone) or `pdf=read route=1 nth=N act=drop+unplug dev=enc0` (software CM: the
+  Nth read of the router unanswered, then the hot unplug).
+- Rapid plug/unplug (task 43.49): alternate `x-cable` false/true from a script at the
+  interval under test; `pdf=icm-event code=3 act=unplug dev=enc0 repeat=on` pulls the
+  enclosure every time it is announced.
+- A lost or late reply: `pdf=icm-resp code=4 act=drop` (approve unanswered),
+  `act=delay delay=12000` past the driver's timeout (a stale reply arrives later),
+  `pdf=read act=dup delay=50` (a duplicate). `x-reply-fault-state` shows what fired; the
+  QMP event `USB4_REPLY_FAULT` marks the moment in the kit's log.
+- Host reset: `x-host-reset` = `router` (rings read disabled, the ICM restarts with the
+  driver not ready) or `interface`.
+- Safe mode: `x-icm-mode=0` on `-device usb4-host` (or `qom-set` before the driver
+  starts): the bind must stop at the mode check.
+
+A kit picks the new build up by copying `qemu-system-x86_64.exe` from the new output
+folder into its own `bin\` and updating the SHA-256 its launcher checks. The DLLs come
+from the same `toolchain\msys64\ucrt64\bin` and the firmware from the same `-L`
+directory as before. Every control is off by default, so a kit that sets none of them
+behaves as with the previous binary.
 - Polling: control-packet round trips on real hardware are about 156 µs median (Framework
   capture). Busy-poll while a transaction is outstanding; poll for hot-plug every
   100-250 ms when idle. Data (NVMe, USB) does not go through the CM and uses the

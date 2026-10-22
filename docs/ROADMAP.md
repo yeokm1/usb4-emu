@@ -245,11 +245,24 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
 
 ## M6. Failure and reset coverage
 
-- [ ] QMP fault injection: drop next reply, delay reply, surprise removal, host reset, ICM
+- [x] QMP fault injection: drop next reply, delay reply, surprise removal, host reset, ICM
   safe mode reported through the mailbox mode.
+  Done 2026-10-22 (`hw/usb4/usb4-fault.c`, [FAULTS.md](FAULTS.md)): `usb4-host`
+  `x-reply-faults` drops, delays or duplicates (stale copy) any frame queued for RX ring 0,
+  matched by PDF, route, ICM code and count, and can pull or replug a router or reset the
+  host at that frame (QMP event `USB4_REPLY_FAULT`); `x-host-reset` (router or interface);
+  `x-icm-mode` (0 = safe mode in outbound mailbox bits 11:8); `usb4-device` `x-cable` for
+  surprise removal at a chosen moment with the object kept. Surprise removal itself existed
+  before as `device_del` and the bridges' `tunnel=surprise` (qtests `usb4-icm-test`,
+  `usb4-tunnel-test`) and the harness's `act=surprise` (`usb4-harness-test`). Verified by
+  qtest `usb4-fault-test` (9 cases: each fault, unplug during enumeration on both profiles
+  and during a held NVMe read, malformed rules); the other ten usb4 qtest suites pass
+  unchanged.
 - [ ] Exit: unplug during enumeration or during I/O, dropped and stale replies, and guest
   reboot all recover with no stale devices and no stuck interrupts, on Linux and Windows
   11, in both profiles.
+  The stimuli exist and are qtest-verified at the device level (above); the guest runs
+  (Linux and Windows 11, both profiles) are not yet done.
 
 ## M7. USB3 tunneling
 

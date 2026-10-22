@@ -183,8 +183,11 @@ What `scripts/run-cm-test.sh` adds to a q35 machine:
   `run-asm2464-conformance.sh`, `run-chain-conformance.sh` and `run-tb3-conformance.sh` in
   the same directory ([docs/USB4-HOSTS.md](docs/USB4-HOSTS.md) §2); and the qtests
   `usb4-host-test`, `usb4-tunnel-test`, `usb4-icm-test`, `usb4-icm-tr-test`,
-  `usb4-harness-test`, `usb4-tb3dev-test`, `usb4-asm2464-test`, `usb4-asm4242-test` and
-  `usb4-root-hotplug-test` in `src/qemu/build/tests/qtest/`.
+  `usb4-harness-test`, `usb4-fault-test`, `usb4-tb3dev-test`, `usb4-asm2464-test`,
+  `usb4-asm4242-test` and `usb4-root-hotplug-test` in `src/qemu/build/tests/qtest/`.
+- Fault injection: NVMe-side faults on the tunnel bridges ([docs/HARNESS.md](docs/HARNESS.md));
+  dropped, delayed and stale ring 0 replies, cable pulls at a chosen moment, host resets
+  and ICM safe mode on `usb4-host` / `usb4-device` ([docs/FAULTS.md](docs/FAULTS.md)).
 
 ## Licence
 
