@@ -180,3 +180,24 @@ first suspend; each check reads it back with O_DIRECT, with `sda` (buffered), th
 | Later `echo mem` in the same boot | QEMU never reaches `suspended` and resets nothing (no `usb4_fabric_reset`), yet Linux runs its whole resume path ("Low-level resume complete", `tunnels restarted`): the PCIe paths bounce on routers that kept their configuration, `admin-down` then `up`, which the model also takes as a retrain. NVMe kept in all 6 such cycles that were read back. Twice, in two other boots, the guest's user space stopped answering after such a cycle (serial getty and tty1 silent, all vCPUs idle, the kernel still printing); not seen in the boot with the full kernel log (five cycles), not attributed. Why QEMU skips the second suspend is not investigated (it predates this change: the earlier "S3 twice" leg did not check the run state) |
 | `x-cable=false` after the cycles (a real unplug) | pciehp "Link Down", "Card not present", `nvme0` gone, the endpoint removed (`removed`, generation 1); `x-cable=true` and authorisation bring a fresh endpoint (generation 2) with the same pattern |
 | `tb3-alpine-ridge`, one S3 | Unchanged outcome: the endpoint is held for the retrain at the wakeup reset, but the emulated ICM does not rebuild the tunnel (the router comes back unapproved, "runtime resuming timed out", "device disconnected"); pciehp turns the slot off and the guest slot command rule removes the endpoint. The NVMe needs a new authorisation, as before |
+
+#### Windows 7 with xHCI98's connection manager (owner's check of the defaults, 2026-10-23)
+
+Same binary; Windows 7 SP1 x86 (xhci98's `win7.img` on an overlay, `msahci` enabled for
+q35), q35, TCG, 2 vCPUs, `usb4-tunnel-port` with the default `link-retrain=on`. The
+enclosure is the ASM2464 model with a FAT volume (`E:`, "ORICO"); each check copies a
+1 MiB file to it and compares it (`fc /b`).
+
+| Leg | Result |
+|---|---|
+| xHCI98 3.1.0.0 (test cut of kit p43-45), software CM on `usb4-generic` `host-model=amd`, enclosure plugged over QMP | Approved, PCIe up, `E:` on Stor98, data compares clean |
+| XHCITR Safely Remove (tray, unelevated) | Windows stops the device and turns the slot off; the guest slot command rule removes the endpoint (`guest turned the slot off ... remove`, generation 1, `dismissed`). The CM does not tear the path down (the box says it has not confirmed the tunnel closed, the known unelevated-XHCITR case); no retrain is involved |
+| `x-cable=false`, `x-cable=true` | Surprise down, then a fresh endpoint (generation 2); `E:` back with its files, a new write compares clean |
+| `XHCIINST /eject 1` (elevated) | Windows stops it and turns the slot off; the endpoint is removed as above; then the CM tears the path down (`admin-down`) on the empty slot: nothing to retrain. "The PCIe tunnel was closed", exit 0. Replug: generation 3, data clean |
+| The NHI disabled and enabled again (`SetupDi` property change) with the endpoint live | The CM keeps the tunnel up across it (no path teardown, `found at start`); the endpoint stays live, generation 3, data clean |
+| `tb3-alpine-ridge` (the AR PCIe tree on q35, `usb4-tb3-tunnel-dsp`), xHCI98 3.1.0.0 release, XHCITR Safely Remove | As on the generic host: Windows turns the slot off and the endpoint is removed; the firmware CM tears nothing down |
+
+So on Windows 7 the retrain default changes nothing for xHCI98's eject: Windows' pciehp
+turns the slot off before the CM's teardown, and the guest slot command rule removes the
+endpoint as before. xHCI98's CM made no path teardown with the endpoint still live in
+these legs, so the retrain path itself was not reached from Windows 7.
