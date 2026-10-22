@@ -155,7 +155,17 @@ Other properties:
   the guest acknowledges the empty slot or this timeout expires.
 - `orderly-admin-down=on`: makes `down` (and CM admin-down) use the eject
   request, as `eject` does.
-- `endpoint` (read-only): e.g. `live gen=2 gate=open`.
+- `link-retrain` (default `on` on `usb4-tunnel-port` and `usb4-tunnel-dsp`,
+  `off` on `usb4-tunnel-bridge`): a CM that takes the tunnel down and builds
+  it again to the same router, never unplugged in between (as Linux does on
+  S3 resume), keeps the endpoint: the link goes down and up (DLLLA, DLLSC),
+  the endpoint is reset and keeps its generation. An unplug, a link loss or
+  a host router reset still removes it. The `tunnel` property values above
+  are stimuli and never retrain; set while the endpoint is held, they end
+  the retrain. `link-retrain=off` gives the hot-plug
+  behaviour (`ARCHITECTURE.md` 4.4, "Link retrain").
+- `endpoint` (read-only): e.g. `live gen=2 gate=open`; ` retrain` is
+  appended while the endpoint is held for a link retrain.
 - `x-hold-deferred=on|off`: a test hook. While on, the deferred stages
   (quiesce, notify, remove, insert) are held, so the gate can be probed in
   between.
@@ -174,6 +184,10 @@ lifecycle step:
 - `gate-open`
 - `inserted`
 - `insert-failed`
+- `retrain-held`: link retrain, the endpoint has been reset (after its
+  `cutoff`) and is kept while its router's tunnel is down.
+- `retrained`: the tunnel to the same router is back, the same endpoint
+  (same generation) is reachable again.
 
 `DEVICE_DELETED` follows `removed` for the endpoint.
 

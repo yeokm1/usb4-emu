@@ -54,7 +54,7 @@ attached=ustor0:1` (the boot-time down is Linux's lane-1 unplug noted in LINUX-T
 | `x-cable=false` | "0:1: switch unplugged", USB3 tunnel deactivated, `usb 2-1: USB disconnect`, `sda` gone, `lsusb` empty, `0-1` and `nvme0n1` gone; `x-usb3-tunnel` `down reason=surprise ... attached=ustor0:0` |
 | `x-cable=true` | router re-enumerated, USB3 tunnel rebuilt, USB device back (new device number), `sda` reads back the same SHA-256; re-authorised NVMe back |
 | `x-cable=false` with a 64 KiB O_DIRECT write loop to `sda` running | `dd` ends with "Input/output error" (rc 1), no task in D state, `sda` gone; replug brings it back |
-| S3 (`echo mem > /sys/power/state`, `system_wakeup` over QMP), twice | USB relation kept: Linux restarts the USB3 tunnel on resume (`tunnels restarted`), `usb 2-1: reset SuperSpeed USB device number 4` (the same device, not a new one), `sda` reads back the same data. **The NVMe is lost**: see "S3 and the PCIe tunnel" below |
+| S3 (`echo mem > /sys/power/state`, `system_wakeup` over QMP), twice | USB relation kept: Linux restarts the USB3 tunnel on resume (`tunnels restarted`), `usb 2-1: reset SuperSpeed USB device number 4` (the same device, not a new one), `sda` reads back the same data. **The NVMe is lost** (QEMU `c8d878e`; kept since the link retrain): see "S3 and the PCIe tunnel" below |
 
 ### M6: faults
 
@@ -138,7 +138,7 @@ Not run on Windows 11:
   component: Graphics" (the basic display adapter on `-vga std`), no S0 low power idle,
   hibernation off. A display device with a sleep-capable driver would be needed first.
 
-## S3 and the PCIe tunnel (finding, not part of the exits)
+## S3 and the PCIe tunnel (finding, not part of the exits; resolved by the link retrain)
 
 On `usb4-generic` the NVMe does not survive S3, though the USB disk does. On resume
 Linux restarts every tunnel: `tb_tunnel_restart()` deactivates each path before it
@@ -155,13 +155,28 @@ side is unaffected because a USB device detached and re-attached on the same xHC
 is reset, not re-created, by the USB core.
 
 On real hardware the same NVMe retrains its link behind the restored tunnel and keeps
-its `pci_dev`. Fixing it needs a model decision (keep the endpoint across a tunnel
-bounce of the same router, or insert without waiting for the empty-slot acknowledge
-when the router never left), which is an owner question; it is recorded here and in
-the roadmap and not changed.
+its `pci_dev`. The owner decided (2026-10-22) that the model keeps the endpoint across
+such a bounce: the link retrain of ARCHITECTURE.md 4.4, below.
 
 On `tb3-alpine-ridge` S3 (no exit requires it) the PCIe tunnel goes down at the wakeup
 with reason `surprise` (the model's trace), the firmware CM re-announces the router, Linux logs "0-1: runtime resuming timed out" and "0-1:
 device disconnected", and the router is announced again unapproved (`authorized=0`),
 so the NVMe needs a new authorisation. Real Alpine Ridge firmware behaviour across S3
 is not captured.
+
+### With the link retrain (2026-10-22)
+
+QEMU tree of branch `link-retrain` (usb4-emu-wt), `usb4-tunnel-port` with the default
+`link-retrain=on`; the Linux kit above (Kubuntu 26.04.1 live, kernel 7.0.0-30, q35, TCG,
+4 vCPUs, `usb4-generic` with the USB3 tunnel, host loaded by other agents' guests and
+builds). A fresh 32 MiB random pattern written to `nvme0n1` with O_DIRECT before the
+first suspend; each check reads it back with O_DIRECT, with `sda` (buffered), the
+`nvme0` name and the inode of `/sys/bus/pci/devices/0000:01:00.0/config` (a new
+`pci_dev` gets a new inode).
+
+| Leg | Result |
+|---|---|
+| S3 (`mem`, QEMU status `suspended`, `system_wakeup`), four boots | **The NVMe is kept**: same `nvme0`, same config inode, the pattern reads back (SHA-256 prefixes `c7d72d03`, `5c21b0f7`, `58323035`; the last written in the third boot and read again in the fourth), `sda` too; pciehp logs nothing, the nvme driver re-initialises its queues ("4/0/0 default/read/poll queues"). Model trace: the wakeup reset takes the tunnel down (`surprise`), `link retrain of gen 1: link down`, `cutoff`, `held`; Linux restores the routers and the paths (`tunnels restarted`), the tunnel comes up, `retrained`, gate open, generation 1 throughout |
+| Later `echo mem` in the same boot | QEMU never reaches `suspended` and resets nothing (no `usb4_fabric_reset`), yet Linux runs its whole resume path ("Low-level resume complete", `tunnels restarted`): the PCIe paths bounce on routers that kept their configuration, `admin-down` then `up`, which the model also takes as a retrain. NVMe kept in all 6 such cycles that were read back. Twice, in two other boots, the guest's user space stopped answering after such a cycle (serial getty and tty1 silent, all vCPUs idle, the kernel still printing); not seen in the boot with the full kernel log (five cycles), not attributed. Why QEMU skips the second suspend is not investigated (it predates this change: the earlier "S3 twice" leg did not check the run state) |
+| `x-cable=false` after the cycles (a real unplug) | pciehp "Link Down", "Card not present", `nvme0` gone, the endpoint removed (`removed`, generation 1); `x-cable=true` and authorisation bring a fresh endpoint (generation 2) with the same pattern |
+| `tb3-alpine-ridge`, one S3 | Unchanged outcome: the endpoint is held for the retrain at the wakeup reset, but the emulated ICM does not rebuild the tunnel (the router comes back unapproved, "runtime resuming timed out", "device disconnected"); pciehp turns the slot off and the guest slot command rule removes the endpoint. The NVMe needs a new authorisation, as before |
