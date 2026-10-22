@@ -1,6 +1,7 @@
 usb4-emu QEMU changes against v11.1.2
-Exported from branch usb4-emu at c8d878e
+Exported from branch usb4-emu at 5bb712d
 
+  5bb712d tests/qtest: usb4-host M1 exit matrix and the Linux single-MSI path
   c8d878e usb4: USB3 tunnel gate, hub subtrees, x-usb3-tunnel, preos-usb3, qtest
   f381f01 usb4: QMP fault injection on ring 0, x-cable, host resets, ICM mode
   f1e36f8 usb4: tb3-ice-lake, the Ice Lake firmware CM variant
@@ -29613,10 +29614,10 @@ index 0000000000000000000000000000000000000000..8b610390e49792c33471465b076e6db3
 +}
 diff --git a/tests/qtest/usb4-host-test.c b/tests/qtest/usb4-host-test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..10b70206fb44da3555fb16e3b14f44abb5b5e5d9
+index 0000000000000000000000000000000000000000..affafeddb3eb8f0e208a04bc91553d53e4827a58
 --- /dev/null
 +++ b/tests/qtest/usb4-host-test.c
-@@ -0,0 +1,1021 @@
+@@ -0,0 +1,1427 @@
 +/*
 + * QTest for the usb4-host PCI function (USB4 host interface)
 + *
@@ -30605,6 +30606,403 @@ index 0000000000000000000000000000000000000000..10b70206fb44da3555fb16e3b14f44ab
 +    qtest_quit(qts);
 +}
 +
++/* ------------------------------------------------------------------ */
++/* M1 exit matrix: every clearing configuration x every delivery mode  */
++/* ------------------------------------------------------------------ */
++
++/*
++ * ARCHITECTURE.md 4.1: interrupt status clearing depends on the profile
++ * and on the guest's control bits, and the ring behaviours (wraparound,
++ * RX exhaustion, completion ordering, cancellation on reset) must hold
++ * in each configuration with MSI, INTx and pure polling. One case per
++ * pair; the scenario is the same everywhere, the expectations follow
++ * the configuration:
++ *
++ *  - generic:       usb4-generic, ISR read clears (Spec Table 12-28)
++ *  - generic-noac:  usb4-generic with Disable ISR Auto-Clear: reads keep
++ *                   the status, ISC is the only software clear
++ *  - ar:            tb3-alpine-ridge, ISR read clears, ISC ignored
++ *                   (ICM-PROTOCOL.md 2.5, R6), delivery never clears
++ *  - ar-ac:         tb3-alpine-ridge with DMA misc bit 2 (R7): an MSI-X
++ *                   message clears its cause; nothing else changes
++ */
++typedef enum { DLV_POLL, DLV_INTX, DLV_MSI, DLV_MSIX } Dlv;
++
++typedef struct MCfg {
++    const char *name;
++    const char *opts;
++    unsigned paths;         /* cause of RX ring 0 = paths */
++    bool ar;
++    bool noac;              /* Disable ISR Auto-Clear */
++    bool intel_ac;          /* DMA misc auto-clear (bit 2) */
++} MCfg;
++
++static const MCfg mcfg[] = {
++    { "generic", "", 16, false, false, false },
++    { "generic-noac", "", 16, false, true, false },
++    { "ar", ",profile=tb3-alpine-ridge", 12, true, false, false },
++    { "ar-ac", ",profile=tb3-alpine-ridge", 12, true, false, true },
++};
++
++static const char *const dlv_name[] = { "poll", "intx", "msi", "msix" };
++
++#define INTEL_DMA_MISC_AC    (1u << 2)
++
++typedef struct M {
++    T *t;
++    const MCfg *c;
++    Dlv d;
++    uint32_t both;          /* TX0 | RX0 causes */
++    uint64_t tgt;           /* MSI target, or MSI-X targets 0 and 1 */
++    uint16_t msi_data;
++} M;
++
++static bool m_line(M *m)
++{
++    return qtest_get_irq(m->t->qts, 11);
++}
++
++static void m_marks_clear(M *m)
++{
++    if (m->tgt) {
++        qtest_writel(m->t->qts, m->tgt, 0);
++        qtest_writel(m->t->qts, m->tgt + 4, 0);
++    }
++}
++
++/* Delivery for an unmasked TX0 + RX0 completion happened (or not). */
++static void m_check_delivered(M *m, bool expect)
++{
++    switch (m->d) {
++    case DLV_POLL:
++        break;
++    case DLV_INTX:
++        g_assert_cmpint(m_line(m), ==, expect);
++        break;
++    case DLV_MSI:
++        g_assert_cmphex(qtest_readl(m->t->qts, m->tgt), ==,
++                        expect ? m->msi_data : 0);
++        break;
++    case DLV_MSIX:
++        g_assert_cmphex(qtest_readl(m->t->qts, m->tgt), ==, expect ? 1 : 0);
++        g_assert_cmphex(qtest_readl(m->t->qts, m->tgt + 4), ==,
++                        expect ? 2 : 0);
++        break;
++    }
++}
++
++/*
++ * The status a completion left, as the driver's handler or poll loop
++ * sees it, then cleared the way this configuration clears it; the INTx
++ * line follows. @pending: TX0 + RX0 completed since the last service.
++ */
++static void m_service(M *m, bool pending, bool delivered)
++{
++    T *t = m->t;
++    uint32_t want = pending ? m->both : 0;
++    uint32_t v;
++
++    if (m->c->intel_ac && m->d == DLV_MSIX && delivered) {
++        want = 0;                       /* R7: the messages cleared it */
++    }
++    if (m->c->ar) {
++        /* the Intel register set: ISC writes do nothing (R6) */
++        wr(t, ISC0, 0xffffffff);
++    }
++    v = isr0(t);
++    g_assert_cmphex(v & m->both, ==, want);
++    if (m->c->noac) {
++        /* non-destructive read; the line stays up until ISC */
++        g_assert_cmphex(isr0(t) & m->both, ==, want);
++        if (m->d == DLV_INTX && want && delivered) {
++            g_assert(m_line(m));
++        }
++        wr(t, ISC0, v);
++    }
++    g_assert_cmphex(isr0(t) & m->both, ==, 0);
++    if (m->d == DLV_INTX) {
++        g_assert(!m_line(m));
++    }
++    m_marks_clear(m);
++}
++
++static void m_setup(M *m)
++{
++    T *t = m->t;
++    QTestState *qts = t->qts;
++
++    m->both = CAUSE_TX0 | (1u << m->c->paths);
++    if (m->c->noac) {
++        wr(t, HI_CONTROL, DISABLE_ISR_AUTOCLR);
++    }
++    if (m->c->intel_ac) {
++        wr(t, HI_CONTROL, rd(t, HI_CONTROL) | INTEL_DMA_MISC_AC);
++    }
++    switch (m->d) {
++    case DLV_POLL:
++        break;
++    case DLV_INTX: {
++        QPCIDevice *piix = qpci_device_find(t->bus, QPCI_DEVFN(1, 0));
++
++        /* slot 4 INTA# -> PIRQD -> IRQ 11, as test_intx */
++        qpci_config_writeb(piix, 0x63, 11);
++        g_free(piix);
++        qtest_irq_intercept_in(qts, "ioapic");
++        break;
++    }
++    case DLV_MSI: {
++        uint8_t cap = qpci_find_capability(t->dev, PCI_CAP_ID_MSI, 0);
++        uint16_t ctrl = qpci_config_readw(t->dev, cap + PCI_MSI_FLAGS);
++
++        g_assert(cap);
++        m->tgt = guest_alloc(&t->alloc, 16);
++        m->msi_data = 0x4d53;
++        qpci_config_writel(t->dev, cap + PCI_MSI_ADDRESS_LO,
++                           (uint32_t)m->tgt);
++        if (ctrl & PCI_MSI_FLAGS_64BIT) {
++            qpci_config_writel(t->dev, cap + PCI_MSI_ADDRESS_HI,
++                               m->tgt >> 32);
++            qpci_config_writew(t->dev, cap + PCI_MSI_DATA_64, m->msi_data);
++        } else {
++            qpci_config_writew(t->dev, cap + PCI_MSI_DATA_32, m->msi_data);
++        }
++        qpci_config_writew(t->dev, cap + PCI_MSI_FLAGS,
++                           ctrl | PCI_MSI_FLAGS_ENABLE);
++        break;
++    }
++    case DLV_MSIX: {
++        unsigned rx = m->c->paths;
++        uint8_t cap = qpci_find_capability(t->dev, PCI_CAP_ID_MSIX, 0);
++
++        m->tgt = guest_alloc(&t->alloc, 16);
++        qpci_msix_enable(t->dev);
++        if (!(qpci_config_readl(t->dev, cap + PCI_MSIX_TABLE) &
++              PCI_MSIX_FLAGS_BIRMASK)) {
++            /* table in BAR0: qpci_msix_enable() mapped BAR0 again */
++            t->bar = t->dev->msix_table_bar;
++        }
++        for (unsigned v = 0; v < 2; v++) {
++            uint32_t e = t->dev->msix_table_off + 16 * v;
++
++            qpci_io_writel(t->dev, t->dev->msix_table_bar, e,
++                           (uint32_t)(m->tgt + 4 * v));
++            qpci_io_writel(t->dev, t->dev->msix_table_bar, e + 4,
++                           (m->tgt + 4 * v) >> 32);
++            qpci_io_writel(t->dev, t->dev->msix_table_bar, e + 8, v + 1);
++            qpci_io_writel(t->dev, t->dev->msix_table_bar, e + 12, 0);
++        }
++        /* Spec 12.6.3.4.8: TX0 (cause 0) -> vector 0, RX0 -> vector 1 */
++        wr(t, IVAR0, 0);
++        wr(t, IVAR0 + 4 * (rx / 8), 1u << (4 * (rx % 8)));
++        break;
++    }
++    }
++    m_marks_clear(m);
++    if (m->d != DLV_POLL) {
++        wr(t, IMS0, m->both);
++    }
++}
++
++static void test_matrix(const void *opaque)
++{
++    uintptr_t k = (uintptr_t)opaque;
++    M mm = { 0 }, *m = &mm;
++    bool dlv;
++    T *t;
++    unsigned i;
++
++    m->c = &mcfg[k / 4];
++    m->d = k % 4;
++    dlv = m->d != DLV_POLL;
++    t = m->t = t_start("pc", m->c->opts);
++    m_setup(m);
++
++    /* Wraparound: 11 frames through 4-entry rings, one at a time */
++    rings_setup(t, 4, 4);
++    for (i = 0; i < 11; i++) {
++        rx_post(t, 1);
++        tx_queue(t, 0x1000 * i, 16 + 4 * (i % 3), 2);
++        tx_doorbell(t);
++        /* polling truthfulness: indices before any status read */
++        g_assert_cmpuint(tx_ci(t), ==, (i + 1) % 4);
++        g_assert_cmpuint(rx_pi(t), ==, (i + 1) % 4);
++        m_check_delivered(m, dlv);
++        rx_expect(t, 0x1000 * i, 16 + 4 * (i % 3), 2);
++        m_service(m, true, dlv);
++    }
++
++    /* Completion ordering: six descriptors, one doorbell, own PDFs */
++    rings_setup(t, 8, 8);
++    rx_post(t, 7);
++    for (i = 0; i < 6; i++) {
++        tx_queue(t, 0xa000 + i * 0x10, 8 + 4 * i, 1 + i);
++    }
++    tx_doorbell(t);
++    g_assert_cmpuint(tx_ci(t), ==, 6);
++    g_assert_cmpuint(rx_pi(t), ==, 6);
++    m_check_delivered(m, dlv);
++    for (i = 0; i < 6; i++) {
++        g_assert_cmphex(desc_dw2(t, t->tx_ring, i) & DESC_DD, ==, DESC_DD);
++        rx_expect(t, 0xa000 + i * 0x10, 8 + 4 * i, 1 + i);
++    }
++    m_service(m, true, dlv);
++
++    /*
++     * RX exhaustion: two buffers for five frames; the rest wait in order
++     * and complete on refill, each refill a new RX completion (the TX
++     * side completed with the doorbell).
++     */
++    rings_setup(t, 8, 8);
++    rx_post(t, 2);
++    for (i = 0; i < 5; i++) {
++        tx_queue(t, 0x100 * (i + 1), 12, 1);
++    }
++    tx_doorbell(t);
++    g_assert_cmpuint(tx_ci(t), ==, 5);
++    g_assert_cmpuint(rx_pi(t), ==, 2);
++    m_check_delivered(m, dlv);
++    rx_expect(t, 0x100, 12, 1);
++    rx_expect(t, 0x200, 12, 1);
++    m_service(m, true, dlv);
++    rx_post(t, 2);
++    g_assert_cmpuint(rx_pi(t), ==, 4);
++    rx_expect(t, 0x300, 12, 1);
++    rx_expect(t, 0x400, 12, 1);
++    g_assert_cmphex(isr0(t) & m->both, ==,
++                    dlv && m->c->intel_ac && m->d == DLV_MSIX ? 0 :
++                    1u << m->c->paths);
++    if (m->c->noac) {
++        wr(t, ISC0, 0xffffffff);
++    }
++    g_assert_cmphex(isr0(t) & m->both, ==, 0);
++    m_marks_clear(m);
++    rx_post(t, 3);
++    g_assert_cmpuint(rx_pi(t), ==, 5);
++    rx_expect(t, 0x500, 12, 1);
++    g_assert_cmphex(desc_dw2(t, t->rx_ring, 5) & DESC_DD, ==, 0);
++    if (m->c->noac) {
++        wr(t, ISC0, 0xffffffff);
++    } else {
++        isr0(t);
++    }
++    if (m->d == DLV_INTX) {
++        g_assert(!m_line(m));
++    }
++    m_marks_clear(m);
++
++    /* Masked: status still set and indices move; nothing delivered */
++    wr(t, IMC0, 0xffffffff);
++    rx_post(t, 1);
++    tx_queue(t, 0x600, 8, 1);
++    tx_doorbell(t);
++    g_assert_cmpuint(rx_pi(t), ==, 6);
++    m_check_delivered(m, false);
++    rx_expect(t, 0x600, 8, 1);
++    m_service(m, true, false);
++
++    /*
++     * Reset: a frame waits in the FIFO (no RX buffer) with status
++     * pending; a host interface reset clears status, drops the line and
++     * cancels the frame.
++     */
++    if (dlv) {
++        wr(t, IMS0, m->both);
++    }
++    tx_queue(t, 0x700, 8, 1);
++    tx_queue(t, 0x701, 8, 1);
++    tx_queue(t, 0x702, 8, 1);
++    tx_doorbell(t);                 /* two buffers left: 0x702 waits */
++    g_assert_cmpuint(rx_pi(t), ==, 0);
++    g_assert_cmphex(rd(t, IMR0), ==, dlv ? m->both : 0);
++    if (m->c->noac) {
++        g_assert_cmphex(isr0(t) & m->both, ==, m->both);
++    }
++    if (m->d == DLV_INTX) {
++        g_assert(m_line(m));
++    }
++    wr(t, HI_RESET, 1);
++    g_assert_cmphex(isr0(t), ==, 0);
++    g_assert_cmphex(rd(t, IMR0), ==, 0);
++    if (m->d == DLV_INTX) {
++        g_assert(!m_line(m));
++    }
++    rings_setup(t, 8, 8);
++    rx_post(t, 4);
++    g_assert_cmpuint(rx_pi(t), ==, 0);          /* the frames are gone */
++    tx_queue(t, 0x77, 8, 3);
++    tx_doorbell(t);
++    rx_expect(t, 0x77, 8, 3);
++    t_stop(t);
++}
++
++/*
++ * The Linux single-MSI path on Alpine Ridge (drivers/thunderbolt nhi.c
++ * and pci.c at the pinned commit): MSI-X refused, one MSI. Intel quirk
++ * QUIRK_AUTO_CLEAR_INT: nhi_disable_interrupts() masks by a
++ * read-modify-write of the mask register (no IMC) and clears by reading
++ * the status dwords; ring_interrupt_active() with ring->irq == 0 sets
++ * the ring's bit in the mask register by read-modify-write and touches
++ * neither IVAR nor DMA misc; nhi_msi() -> nhi_interrupt_work() reads
++ * the 3 x 12 status bits (two dwords) and relies on the read clearing
++ * them. Delivery must not clear: the bits are there when the work runs.
++ */
++static void test_linux_single_msi_ar(void)
++{
++    T *t = t_start("pc", ",profile=tb3-alpine-ridge");
++    uint8_t cap = qpci_find_capability(t->dev, PCI_CAP_ID_MSI, 0);
++    uint64_t tgt = guest_alloc(&t->alloc, 4);
++    const uint32_t rx0 = 1u << 12;
++    uint16_t ctrl;
++
++    g_assert(cap);
++    /* nhi_disable_interrupts() */
++    wr(t, IMR0, rd(t, IMR0) & ~0xffffffffu);
++    isr0(t);
++    rd(t, ISR0 + 4);
++    /* pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI) */
++    ctrl = qpci_config_readw(t->dev, cap + PCI_MSI_FLAGS);
++    qpci_config_writel(t->dev, cap + PCI_MSI_ADDRESS_LO, (uint32_t)tgt);
++    if (ctrl & PCI_MSI_FLAGS_64BIT) {
++        qpci_config_writel(t->dev, cap + PCI_MSI_ADDRESS_HI, tgt >> 32);
++        qpci_config_writew(t->dev, cap + PCI_MSI_DATA_64, 0x41);
++    } else {
++        qpci_config_writew(t->dev, cap + PCI_MSI_DATA_32, 0x41);
++    }
++    qpci_config_writew(t->dev, cap + PCI_MSI_FLAGS,
++                       ctrl | PCI_MSI_FLAGS_ENABLE);
++    /* tb_ring_start() for TX 0 and RX 0, ring_interrupt_active() */
++    rings_setup(t, 8, 8);
++    rx_post(t, 4);
++    wr(t, IMR0, rd(t, IMR0) | CAUSE_TX0);
++    wr(t, IMR0, rd(t, IMR0) | rx0);
++    g_assert_cmphex(rd(t, IMR0), ==, CAUSE_TX0 | rx0);
++    g_assert_cmphex(rd(t, HI_CONTROL) & INTEL_DMA_MISC_AC, ==, 0);
++
++    for (unsigned i = 0; i < 3; i++) {
++        qtest_writel(t->qts, tgt, 0);
++        tx_queue(t, 0x5100 + i, 12, 1);
++        tx_doorbell(t);
++        g_assert_cmphex(qtest_readl(t->qts, tgt), ==, 0x41);
++        /* nhi_interrupt_work(): both dwords, cleared by the reads */
++        g_assert_cmphex(isr0(t) & (CAUSE_TX0 | rx0), ==, CAUSE_TX0 | rx0);
++        rd(t, ISR0 + 4);
++        g_assert_cmphex(isr0(t) & (CAUSE_TX0 | rx0), ==, 0);
++        rx_expect(t, 0x5100 + i, 12, 1);
++        rx_post(t, 1);
++    }
++    /* a completion while the work has not run yet: still one status */
++    qtest_writel(t->qts, tgt, 0);
++    tx_queue(t, 0x5200, 12, 1);
++    tx_queue(t, 0x5201, 12, 1);
++    tx_doorbell(t);
++    g_assert_cmphex(qtest_readl(t->qts, tgt), ==, 0x41);
++    g_assert_cmphex(isr0(t) & (CAUSE_TX0 | rx0), ==, CAUSE_TX0 | rx0);
++    g_assert_cmphex(isr0(t) & (CAUSE_TX0 | rx0), ==, 0);
++    rx_expect(t, 0x5200, 12, 1);
++    rx_expect(t, 0x5201, 12, 1);
++    t_stop(t);
++}
++
 +int main(int argc, char **argv)
 +{
 +    g_test_init(&argc, &argv, NULL);
@@ -30635,6 +31033,15 @@ index 0000000000000000000000000000000000000000..10b70206fb44da3555fb16e3b14f44ab
 +    qtest_add_func("/usb4-host/ring-disable", test_ring_disable);
 +    qtest_add_func("/usb4-host/vacancy", test_vacancy);
 +    qtest_add_func("/usb4-host/hotplug", test_hotplug);
++    qtest_add_func("/usb4-host/linux-single-msi-ar",
++                   test_linux_single_msi_ar);
++    for (uintptr_t k = 0; k < 4 * ARRAY_SIZE(mcfg); k++) {
++        g_autofree char *name = g_strdup_printf("/usb4-host/matrix/%s/%s",
++                                                mcfg[k / 4].name,
++                                                dlv_name[k % 4]);
++
++        qtest_add_data_func(name, (const void *)k, test_matrix);
++    }
 +
 +    return g_test_run();
 +}

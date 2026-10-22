@@ -74,12 +74,21 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
 - [x] Control packet CRC32C and framing, verified against Spec Appendix A.2 vectors here,
   before any guest sends a control packet.
   Done 2026-10-14: both Appendix A.2 vectors in `tests/usb4/fabric-test.c`.
-- [ ] Exit: qtests pass for wraparound, RX exhaustion, completion ordering, reset, the
+- [x] Exit: qtests pass for wraparound, RX exhaustion, completion ordering, reset, the
   mailbox request and error bits, and clearing behaviour in every configuration:
   Intel read-to-clear with and without the auto-clear control bit, USB4 with and without
   Disable ISR Auto-Clear, and the exact single-MSI initialisation sequence Linux uses. A
   ring-level test driver exercises the rings over MSI, INTx and pure polling in each
   configuration. No Linux binding is claimed at this milestone.
+  Done 2026-10-22 (QEMU `5bb712d`): `usb4-host-test` `/usb4-host/matrix/<cfg>/<dlv>`, 16
+  cases, runs wraparound, completion ordering, RX exhaustion with refill, a masked
+  completion and a host interface reset (status cleared, INTx dropped, a waiting frame
+  cancelled) for each of `usb4-generic` with and without Disable ISR Auto-Clear and
+  `tb3-alpine-ridge` with and without the Intel auto-clear bit, over pure polling, INTx,
+  single MSI and MSI-X, checking the delivery and the clearing rule after every
+  completion; `/usb4-host/linux-single-msi-ar` is the Linux single-MSI sequence on Alpine
+  Ridge (`nhi.c` and `pci.c` under `QUIRK_AUTO_CLEAR_INT`). The mailbox request and error
+  bits are `usb4-icm-test` `/usb4-icm/identity`. `usb4-host-test` 40 cases.
 
 ## M2. Alpine Ridge profile: ICM startup and TB3 enumeration
 
