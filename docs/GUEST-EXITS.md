@@ -223,6 +223,34 @@ SHPC unless told to; the Thunderbolt driver approves, as a ring-level client wou
   after a rescan, same data.
 - Idle: deltas 0 on every thunderbolt and nvme vector, no warnings, no D state.
 
+## Windows 11, `tb3-alpine-ridge` with the Intel package (WIP, 2026-10-23)
+
+QEMU `ec6776b` (`bin-ec6776b`), `scripts/run-win11-ar.sh` (bridge topology, DSN
+`0x5553423445ab0001`), own overlay on the win11tb3 overlay, TCG 4 vCPUs, Intel DCH
+1.41.1379.0 installed with `pnputil` (published `oem1.inf`).
+
+- M3 smoke gate: the NHI binds as "Thunderbolt(TM) Controller - 15BF" (instance
+  `...ŭ3423445AB000120`, from the DSN), status OK; the driver sends driver ready
+  (`0x03`), boot ACL (`0x18`) and get route; System log `nhi` 9001 "driver is loaded and
+  initialized connection to HW", driver 1.41.1379.0, NVM version Unknown, and 9002
+  "Thunderbolt device is connected", TS3 Plus, CalDigit, Inc., NVM version Invalid, plus
+  9006 "An error was detected" entries (codes 0x19F, 0x1A9, 0x20D, 0xEB, 0x22F, 0x12B,
+  0xCE; meaning unknown; the NVM versions need the DMA port, R20). Before QEMU `ec6776b`
+  the driver's MSI-X handling (no auto-clear; clears through 0x3780c) met an interrupt
+  storm, fixed there.
+- `security=user` needs the Thunderbolt Control Center to approve (not in the image); the
+  runs below use `security=none`.
+- M5 (security=none): NVMe in Device Manager (error 0), NTFS T:, 32 MiB file, SHA-256
+  `914E8937...`; `x-cable=false`: 9003, disk gone; `x-cable=true`: 9002, disk back,
+  same hash.
+- M6, each with a cable cycle and a 20 s idle window (NHI 0, NVMe 0 interrupts): device
+  connected event dropped with the router pulled, and seen with the router pulled:
+  nothing stale; the first route-1 config reply dropped (resent), 3 s late, duplicated;
+  the get-route reply dropped, 12 s late: router, NVMe and hash back each time. Unplug
+  during a raw 1 MiB read held by the harness (token 89307): "Disk 1 has been surprise
+  removed", 9003, the reader process ends; replug: all back, same hash.
+- Owed: guest reboot leg, M7 Windows legs, Windows 11 S3 (virtio-win display driver).
+
 ## S3 and the PCIe tunnel (finding, not part of the exits; resolved by the link retrain)
 
 On `usb4-generic` the NVMe does not survive S3, though the USB disk does. On resume
