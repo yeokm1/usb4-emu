@@ -152,3 +152,30 @@ dock `15d3`), which is derived from the router UID and already appears in the do
 Generated model data (`usb4-adl-data.h`, `usb4-asm2464-data.h`) and the conformance
 replays are byte-identical before and after the scrub. The copyright line of the capture
 script copy (`capture-linux.sh.used`) still names its author.
+
+## linux-orico-suspend-assistOFF_prebootOFF (2026-10-23)
+
+Archive `p14s-linux-20261023-000123-orico-suspend` and its `.sha256`. Installed Kubuntu
+26.04.1, kernel 7.0.0-38-generic, CSM boot, lockdown none, BIOS as R1 of 2026-10-15
+(Assist off, pre-boot off, security User Authorization). ORICO AAGM2-U4 not attached at
+power-on. Options `interactive=1 rebind=1 redact=1 watch-mmio=1 watch-tail=90
+suspend=1`; boot tracing `first-bind` (the first bind after power-on is traced). The
+kernel command line had `thunderbolt.dnydbg=+p`, a misspelling the kernel ignored; the
+script enabled dynamic debug itself before the first bind. The `debugfs/thunderbolt not
+present` warning in `capture.log` was premature (checked before the module was
+loaded); every snapshot from `snap-2` on has the router dumps.
+
+What happened: the replugged ORICO was announced but not approved in time and fell back
+to a USB disk on the Thunderbolt xHCI after 9.4 s, so the suspend-to-idle
+(`rtcwake -m freeze -s 15`) ran with no tunnel. Analysis:
+[`docs/captures/P14S-SUSPEND-2026-10-23.md`](../../../docs/captures/P14S-SUSPEND-2026-10-23.md).
+
+Redaction: `redact.py` crashed on the machine (it took the root hubs' iSerial, their
+PCI address, for a USB serial; fixed 2026-10-23) after blanking PCI addresses in four
+files, and the archive was packed with redaction incomplete and no `REDACTIONS.txt`. On
+the host, `tools/p14s-capture/repair-20261023.py` put the 63 blanked addresses back from
+undamaged copies of the same kernel log, then the fixed `scrub.py` scrubbed the archive.
+`REDACTIONS.txt` (new) lists both passes. Checked afterwards: none of the MAC addresses,
+USB serial, root and resume filesystem UUIDs or host name found in the unredacted copy
+remains; DMI serials and the system UUID had been redacted on the machine. The
+unredacted archive is not in the repository.
