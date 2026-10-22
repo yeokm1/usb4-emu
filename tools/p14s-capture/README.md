@@ -107,6 +107,11 @@ Steps:
    tracepoints can only be enabled after the module is loaded, and the
    driver binds during the load.
 
+   Spell it exactly: the kernel silently ignores an unknown
+   `thunderbolt.<name>=` option (`thunderbolt.dnydbg=+p` was ignored in the
+   2026-10-23 run). The script warns about every
+   `thunderbolt.<name>=` on the command line that the module does not know.
+
    The script checks the result rather than the command line: it counts
    the `tb_*` events in the boot trace buffer and records
    `boot tracing: yes` only if there are some, `first-bind` in the mode
@@ -160,7 +165,22 @@ without asking), `--no-rebind`, `--no-redact`, `--out DIR`, and:
   Sampling of an NHI stops at the first all-ones read (controller gone),
   after which only its presence in sysfs is polled.
 - `--suspend`: one suspend-to-idle with the device attached (asks first).
+- `--suspend-deep`: one suspend to RAM (S3) with the device attached (asks
+  first), after the `--suspend` one if both are given: `rtcwake -m mem -s 15`
+  with `/sys/power/mem_sleep` set to `deep` for it and restored afterwards
+  (skipped if the machine offers no `deep`). Snapshot `snap-6m-after-s3`,
+  watch label `6-suspend-s3`. Both suspend options also record `lsblk` after
+  the resume (`pci/nvme-after-*.txt`). Use a setting where the device is
+  tunnelled before the suspend: with pre-boot off a USB4 device must be
+  approved within about 9 s of the plug or it falls back to USB (the
+  2026-10-23 suspend run missed that window and had no tunnel to suspend).
 - `--dp`: the monitor connect/disconnect step.
+
+The redaction step (`redact.py`, skipped with `--no-redact`) has a self-test,
+`python3 redact.py --self-test`, which runs the case that broke the 2026-10-23
+run: an xHCI root hub's USB serial is its PCI address (`SerialNumber:
+0000:2b:00.0`), which must not be taken for a serial, and a directory named
+after a scrubbed value must move with every file in it.
 
 The archive is safe to store on FAT32 and to unpack on Windows: names
 contain no `: * ? " < > | \`, no trailing dots or spaces, no two names in a
@@ -399,6 +419,14 @@ with a built-in driver), not `no`.
    Linux with tracing options. Note whether Secure Boot is on; turn it off
    for the run if the script reports lockdown.
 
+7. **P14s suspend with a tunnel** (after the 2026-10-23 run, which had none,
+   `docs/captures/P14S-SUSPEND-2026-10-23.md` §8): Assist off, **pre-boot
+   on**, ORICO (or the TS3 Plus) attached at power-on, tracing options spelt
+   exactly. `sudo bash capture-linux.sh --label orico-suspend-s3 --watch-mmio 1
+   --suspend --suspend-deep`. At the plug prompt press Enter as soon as the
+   device is plugged and authorise it when asked. After each resume check
+   whether `lsblk` still lists the enclosure's NVMe.
+
 Write the BIOS settings of every run into `bios-settings.txt` (see
 [What to prepare](#what-to-prepare)).
 
@@ -492,4 +520,5 @@ What they do change, and why:
 | `win98/PCIDUMP.COM` | PCI and RSDP dump program |
 | `win98/PCIDUMP.LST` | its listing |
 | `win98/MKPCIDMP.SCR` | DEBUG script that recreates `PCIDUMP.COM` |
+| `repair-20261023.py` | one-off host repair of the 2026-10-23 archive (before `scrub.py`) |
 | `win98/gen_pcidump.py` | builds the three files above; `--check-gas AS OBJCOPY` cross-checks against GNU as |

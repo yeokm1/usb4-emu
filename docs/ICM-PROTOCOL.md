@@ -128,11 +128,15 @@ minimal host router and send no driver-ready; any value other than 0 or 3 aborts
 
 | Code | Command | Data | When the Alpine Ridge client sends it | Evidence |
 |---|---|---|---|---|
-| 0x05 | save devices | 0 | system suspend, before 0x07 | [inf] |
+| 0x05 | save devices | 0 | system suspend, before 0x07 | [inf]; the 2026-10-23 s2idle (§14) shows the suspend and resume around it but not the command, which is neither traced nor logged |
 | 0x06 | disconnect PCIe paths | 0 | teardown of all PCIe tunnels by the client (host NVM upgrade path) | [inf] |
 | 0x07 | driver unloads | 0 | driver unbind, system suspend, runtime suspend | [obs] `M:2-unbound` after unbind; `M:1-initial` and `M:5-plugged` after runtime suspends |
 | 0x10 / 0x11 | disconnect port A / B paths | 1, then 2 | tearing down a host-to-host DMA tunnel | [inf], out of scope |
 | 0x23 | allow all devices | 0 | every bind, right after the mode check shows CM mode, before driver-ready | [obs] `M:3-after-rebind` |
+
+The code field after a D3 exit is not dependable [obs]: it read 0 instead of the last
+code after the 2026-10-23 s2idle and after some runtime D3 exits on 2026-10-15
+(captures/P14S-SUSPEND-2026-10-23.md §4); the client only masks it out.
 
 Effect of "driver unloads" [obs]: tunnels and device approval survive it. After the
 runtime suspend before `T:34155` the dock was re-announced as approved (`T:34163`,
@@ -1229,3 +1233,31 @@ notification reporting), Link Status 8 GT/s x2 with DL Active; the NVMe below it
 stays the guest's, so ASPM is advertised and stays off. The host side of the tunnel
 (the Alpine Ridge downstream port 04:01.0, captured at 2.5 GT/s x4) is unchanged. The
 switch exists only on q35; the i440FX tunnel bridge has no ASM2464 ports.
+
+## 14. Suspend-to-idle (2026-10-23)
+
+P14s, ORICO AAGM2-U4, Assist off, pre-boot off, one `rtcwake -m freeze -s 15`
+(`tests/captures/p14s-gen1/linux-orico-suspend-assistOFF_prebootOFF/`; analysis
+[captures/P14S-SUSPEND-2026-10-23.md](captures/P14S-SUSPEND-2026-10-23.md)). The ORICO had
+fallen back to USB before the suspend, so **no tunnel was suspended**; tunnel survival
+across s2idle and S3 remains uncaptured.
+
+- Client sequence [obs, mailbox commands spec]: 0x05 and 0x07 (not visible), ring 0
+  stopped in suspend_noirq, restarted on resume, driver ready from the resume path with the same response
+  words, host router answered in 9 ms, no events.
+- Outbound mailbox `0x800003f0` -> `0x800003f5` across the s2idle, the NHI's first D3 of
+  the run (runtime PM was off): R2's rule, with system suspend as the D3 entry [obs].
+  Firmware status `0x800001a1` throughout.
+- The host router's lane adapters 1 and 2 read after the resume exactly as with nothing
+  plugged, though the device stayed attached over USB, and adapter 3's DMA-port data
+  and several router vendor dwords were cleared: the Thunderbolt side came back in a
+  reset state while the controller's xHCI kept its USB device without a reset [obs;
+  the mechanism is inf].
+- S3 (second run, 07:28, also without a tunnel): the controller lost power (xHCI "root
+  hub lost power"), the outbound mailbox read its power-on `0x800003f0` again, the
+  firmware CM answered the post-resume driver ready with the same words, and the boot
+  ACL kept its entries [obs].
+- Model: unchanged (the s2idle path is the runtime-suspend path plus 0x05, all already
+  modelled; the router reset is invisible with nothing attached; QEMU's S3 wakeup reset
+  already restores `0x800003f0` and keeps the ACL). Next: the same runs with a tunnel
+  (pre-boot on), captures/P14S-SUSPEND-2026-10-23.md §9.

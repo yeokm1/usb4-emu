@@ -24,6 +24,11 @@ if grep -q $'\r' "$0" 2>/dev/null; then echo "ERROR: $0 has Windows (CRLF) line 
 #   --watch-tail SECS  length of that final watch (default 90)
 #   --suspend          after the approve step, offer a 15 s suspend-to-idle
 #                      (rtcwake -m freeze) with tracing on
+#   --suspend-deep     after the approve step (and after --suspend's
+#                      s2idle, if both are given), offer a 15 s suspend to
+#                      RAM, S3 (rtcwake -m mem with /sys/power/mem_sleep set
+#                      to "deep" for it, then restored); needs "deep" in
+#                      /sys/power/mem_sleep
 #   --dp               after the approve step, ask for a monitor to be
 #                      connected to the dock and disconnected again
 #
@@ -60,6 +65,8 @@ if grep -q $'\r' "$0" 2>/dev/null; then echo "ERROR: $0 has Windows (CRLF) line 
 #   * if you answer "y" when asked, a newly plugged device is authorised by
 #     writing 1 to its sysfs "authorized" file (what boltctl does).
 #   * --suspend: one suspend-to-idle with an RTC wake-up, if you answer "y".
+#   * --suspend-deep: one S3 suspend with an RTC wake-up, if you answer "y";
+#     /sys/power/mem_sleep is set to "deep" for it and restored after.
 # It never writes device registers, NVM, firmware or firmware settings.
 
 set -u
@@ -73,6 +80,7 @@ LABEL=
 WATCH=
 WATCH_TAIL=90
 SUSPEND=0
+SUSPEND_DEEP=0
 DP=0
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -84,6 +92,7 @@ while [ $# -gt 0 ]; do
 	--watch-mmio) WATCH=${2:?--watch-mmio needs seconds}; shift ;;
 	--watch-tail) WATCH_TAIL=${2:?--watch-tail needs seconds}; shift ;;
 	--suspend) SUSPEND=1 ;;
+	--suspend-deep) SUSPEND_DEEP=1 ;;
 	--dp) DP=1 ;;
 	-h|--help) sed -n '3,/^# It never writes/p' "$0"; exit 0 ;;
 	*) echo "unknown option $1" >&2; exit 2 ;;
@@ -438,6 +447,24 @@ case " $CMDLINE " in *" trace_event="*thunderbolt*) BT_TRACE=yes ;; esac
 case " $CMDLINE " in *" trace_buf_size="*) BT_BUF=yes ;; esac
 BT_HOLD=no
 case " $CMDLINE " in *" modprobe.blacklist="*thunderbolt*) BT_HOLD=yes ;; esac
+# thunderbolt.<name>= options the module does not have are ignored by the
+# kernel without a word; the P14s run of 2026-10-23 lost thunderbolt.dyndbg
+# to the spelling "thunderbolt.dnydbg". Warn about every unknown name.
+BT_UNKNOWN=
+TB_PARAMS=$(modinfo -p thunderbolt 2>/dev/null | sed 's/:.*//')
+for tok in $CMDLINE; do
+	case "$tok" in
+	thunderbolt.*=*) ;;
+	*) continue ;;
+	esac
+	name=${tok#thunderbolt.}
+	name=${name%%=*}
+	[ "$name" = dyndbg ] && continue
+	if [ -n "$TB_PARAMS" ] && printf '%s\n' "$TB_PARAMS" | grep -qx "$name"; then
+		continue
+	fi
+	BT_UNKNOWN="$BT_UNKNOWN thunderbolt.$name"
+done
 # write_capture_info: called once the boot trace has been checked.
 write_capture_info() {
 {
@@ -448,7 +475,7 @@ write_capture_info() {
 	echo "secure boot: $SB"
 	echo "lockdown: $LOCKDOWN"
 	echo "boot tracing: $BOOT_TRACING (thunderbolt.dyndbg: $BT_DYNDBG, trace_event=thunderbolt: $BT_TRACE, modprobe.blacklist=thunderbolt: $BT_HOLD, trace_buf_size: $BT_BUF; driver $TB_MOD; boot trace events: $TB_BOOT_EV)"
-	echo "options: interactive=$INTERACTIVE rebind=$REBIND redact=$REDACT watch-mmio=${WATCH:-off} watch-tail=$WATCH_TAIL suspend=$SUSPEND dp=$DP"
+	echo "options: interactive=$INTERACTIVE rebind=$REBIND redact=$REDACT watch-mmio=${WATCH:-off} watch-tail=$WATCH_TAIL suspend=$SUSPEND suspend-deep=$SUSPEND_DEEP dp=$DP"
 } >"$O/capture-info.txt"
 }
 log "boot mode: $BOOTMODE; secure boot: $SB; lockdown: $LOCKDOWN"
@@ -519,6 +546,9 @@ else
 	BOOT_TRACING=no
 fi
 write_capture_info
+for o in $BT_UNKNOWN; do
+	log "WARNING: kernel command line has $o=, which the thunderbolt module does not know (the kernel ignores it); did you mean thunderbolt.dyndbg=+p?"
+done
 log "boot tracing: $BOOT_TRACING (thunderbolt.dyndbg=$BT_DYNDBG trace_event=$BT_TRACE modprobe.blacklist=$BT_HOLD trace_buf_size=$BT_BUF; driver $TB_MOD)"
 case "$BOOT_TRACING" in
 yes|first-bind)
@@ -637,9 +667,15 @@ elif err=$(mount -t debugfs none "$DEBUGFS" 2>&1); then
 else
 	log "WARNING: debugfs not mounted and mount failed: $err (no register dumps)"
 fi
-if [ "$DEBUGFS_OK" = 1 ] && [ ! -d "$DEBUGFS/thunderbolt" ]; then
-	log "WARNING: $DEBUGFS/thunderbolt not present (lockdown, or kernel without debugfs support)"
-fi
+# check_tb_debugfs: $DEBUGFS/thunderbolt exists only while the module is
+# loaded, so in first-bind mode it is checked after the modprobe below (the
+# 2026-10-23 run warned before the load, falsely).
+check_tb_debugfs() {
+	[ "$DEBUGFS_OK" = 1 ] && [ -d /sys/module/thunderbolt ] || return 0
+	[ -d "$DEBUGFS/thunderbolt" ] ||
+		log "WARNING: $DEBUGFS/thunderbolt not present with the driver loaded (lockdown, or kernel without CONFIG_USB4_DEBUGFS_WRITE/debugfs support)"
+}
+check_tb_debugfs
 snapshot 1-initial
 
 # 4b. First-bind mode (driver not loaded at boot, modprobe.blacklist):
@@ -652,6 +688,7 @@ if [ "$FIRST_BIND" = 1 ]; then
 	done
 	if modprobe thunderbolt 2>>"$LOG"; then
 		log "thunderbolt module loaded,${HELD:- no NHI} held back"
+		check_tb_debugfs
 	else
 		log "WARNING: modprobe thunderbolt failed; first bind not traced"
 	fi
@@ -782,6 +819,48 @@ if [ "$REBIND" = 1 ] && [ -n "$NHIS" ]; then
 	fi
 fi
 
+# do_suspend freeze|deep: one 15 s system suspend with an RTC wake-up.
+# freeze = suspend-to-idle (snapshot 6s-after-suspend, as before
+# 2026-10-23); deep = S3: /sys/power/mem_sleep is set to "deep" for
+# "rtcwake -m mem" and restored afterwards (snapshot 6m-after-s3).
+do_suspend() {
+	local kind=$1 mode what tag snap old_ms=
+	if [ "$kind" = deep ]; then
+		mode=mem what="Suspend to RAM (S3, deep)" tag=s3 snap=6m-after-s3
+	else
+		mode=freeze what="Suspend to idle" tag= snap=6s-after-suspend
+	fi
+	if ! have rtcwake; then
+		log "WARNING: --suspend${tag:+-deep}: rtcwake not found (util-linux); skipped"
+		return 0
+	fi
+	if [ "$kind" = deep ]; then
+		if ! grep -qw deep /sys/power/mem_sleep 2>/dev/null; then
+			log "WARNING: --suspend-deep: no \"deep\" in /sys/power/mem_sleep ($(cat /sys/power/mem_sleep 2>&1)); skipped"
+			return 0
+		fi
+		old_ms=$(sed -n 's/.*\[\([a-z0-9]*\)\].*/\1/p' /sys/power/mem_sleep)
+	fi
+	ask "$what for 15 seconds now (the screen goes dark, the machine wakes by itself)?" || return 0
+	{ cat /sys/power/state; cat /sys/power/mem_sleep; } \
+		>>"$O/system/power-state-before-suspend${tag:+-$tag}.txt" 2>&1
+	if [ "$kind" = deep ] && [ "$old_ms" != deep ]; then
+		try_write deep /sys/power/mem_sleep && log "mem_sleep set to deep (was $old_ms)"
+	fi
+	watch_start "6-suspend${tag:+-$tag}"
+	log "suspending: rtcwake -m $mode -s 15"
+	run "system/rtcwake${tag:+-$tag}.txt" rtcwake -m "$mode" -s 15
+	log "resumed"
+	if [ "$kind" = deep ] && [ -n "$old_ms" ] && [ "$old_ms" != deep ]; then
+		try_write "$old_ms" /sys/power/mem_sleep && log "mem_sleep restored to $old_ms"
+	fi
+	sleep 10
+	watch_stop
+	for nhi in $(find_nhis | sort -u); do keep_d0 "$nhi" " (after ${tag:-s2idle} resume)"; done
+	snapshot "$snap"
+	run "pci/nvme-after-${tag:-suspend}.txt" sh -c 'ls -l /dev/nvme* ; lsblk -o NAME,SIZE,MODEL,TRAN'
+}
+
 # 7. Plug, approve, unplug.
 if [ "$INTERACTIVE" = 1 ]; then
 	wpause 4-unplug "If a Thunderbolt device is plugged in, UNPLUG it now (unmount it first) and wait 10 seconds."
@@ -805,22 +884,10 @@ if [ "$INTERACTIVE" = 1 ]; then
 	for b in $TBC; do dump_pci_dev "$b" "$O/pci/tb-complex-with-device"; done
 	run pci/lspci-tv-with-device.txt lspci -tvnn
 	run pci/nvme-with-device.txt sh -c 'ls -l /dev/nvme* ; lsblk -o NAME,SIZE,MODEL,TRAN'
-	# Optional: system suspend (s2idle) with the device attached.
-	if [ "$SUSPEND" = 1 ]; then
-		if ! have rtcwake; then
-			log "WARNING: --suspend: rtcwake not found (util-linux); skipped"
-		elif ask "Suspend to idle for 15 seconds now (the screen goes dark, the machine wakes by itself)?"; then
-			cat /sys/power/state >"$O/system/power-state-before-suspend.txt" 2>&1
-			cat /sys/power/mem_sleep >>"$O/system/power-state-before-suspend.txt" 2>&1
-			watch_start 6-suspend
-			log "suspending: rtcwake -m freeze -s 15"
-			run system/rtcwake.txt rtcwake -m freeze -s 15
-			log "resumed"
-			sleep 10
-			watch_stop
-			snapshot 6s-after-suspend
-		fi
-	fi
+	# Optional: system suspend with the device attached: s2idle (--suspend)
+	# and/or S3 (--suspend-deep), in that order.
+	[ "$SUSPEND" = 1 ] && do_suspend freeze
+	[ "$SUSPEND_DEEP" = 1 ] && do_suspend deep
 	# Optional: DisplayPort tunnel through the dock.
 	if [ "$DP" = 1 ]; then
 		wpause 6-dp "CONNECT a monitor to the dock's DisplayPort/HDMI output now and wait until it shows a picture (about 15 seconds)."

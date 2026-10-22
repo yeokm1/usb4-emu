@@ -156,6 +156,7 @@ it leaves. That is the removal signal a driver must handle.
 | Real USB4 host presets (Alder Lake, ASM4242) and conformance | [USB4-HOSTS.md](USB4-HOSTS.md) |
 | Real USB4 device router (ORICO / ASM2464): capture analysis and preset | [captures/ORICO-ASM2464.md](captures/ORICO-ASM2464.md) |
 | The same enclosure on the P14s (Alpine Ridge ICM), BIOS matrix, Windows 98 `$PIR` | [captures/P14S-ORICO-2026-10-15.md](captures/P14S-ORICO-2026-10-15.md) |
+| The P14s across suspend-to-idle (firmware CM, NHI registers, S3 still owed) | [captures/P14S-SUSPEND-2026-10-23.md](captures/P14S-SUSPEND-2026-10-23.md) |
 | What the Windows 11 CM required | [WINDOWS-DEBUG.md](WINDOWS-DEBUG.md) |
 | Windows 98 test bed and results | [WIN98-TEST.md](WIN98-TEST.md) |
 | Linux test bed | [LINUX-TEST.md](LINUX-TEST.md) |
