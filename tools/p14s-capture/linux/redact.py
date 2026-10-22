@@ -4,6 +4,7 @@
 """Redact host-identifying data from a capture directory, in place.
 
 Usage: redact.py DIR [SECRETS_FILE]
+       redact.py --self-test
 
 SECRETS_FILE (optional) holds one literal string per line (system/board/
 chassis serials, system UUID, NIC MAC addresses, host name). In addition,
@@ -115,10 +116,19 @@ DSN_LINE = re.compile(r"(?:Device Serial Number|serial_number:)[ \t]*"
 V1_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-1[0-9a-fA-F]{3}-"
                      r"[89abAB][0-9a-fA-F]{3}-([0-9a-fA-F]{12})")
 
+# A PCI address (domain:bus:device.function, or bus:device.function) is
+# never a serial number or a MAC address. Linux uses it as the iSerial of an
+# xHCI root hub ("usb usb3: SerialNumber: 0000:2b:00.0"); the P14s capture of
+# 2026-10-23 collected it as a USB serial, scrubbed the PCI address from every
+# log and then failed renaming pci/.../0000:2b:00.0/config.bin.
+PCI_ADDR = re.compile(r"^(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-1][0-9a-fA-F]"
+                      r"\.[0-7]$")
+PCI_ADDR_AHEAD = (r"(?!(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-1][0-9a-fA-F]"
+                  r"\.[0-7][ \t]*$)")
 MAC = re.compile(r"(?<![0-9A-Fa-f:])[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}"
                  r"(?!:?[0-9A-Fa-f])")
 SERIAL = re.compile(r"((?:Serial Number|SerialNumber|serial)[ \t]*[:=][ \t]*)"
-                    r"(?!<)(\S[^\r\n]*)")
+                    r"(?!<)" + PCI_ADDR_AHEAD + r"(\S[^\r\n]*)", re.M)
 V1_EPOCH = datetime.datetime(2018, 1, 1)
 # Absent, all-ones, or already redacted (0x58 bytes).
 NO_DSN = (0, 0xffffffffffffffff, 0x5858585858585858)
@@ -176,7 +186,7 @@ class Redactor:
         self.keep_dsn_ids = set(keep_dsn)
         for s in secrets:
             s = s.strip()
-            if len(s) >= 4 and s.lower() not in (
+            if len(s) >= 4 and not PCI_ADDR.match(s) and s.lower() not in (
                     "none", "not specified", "default string",
                     "to be filled by o.e.m.", "0123456789", ZERO_UUID):
                 self.literal.setdefault(s, ("secret", "<REDACTED>"))
@@ -184,7 +194,8 @@ class Redactor:
     # ---- collection ----------------------------------------------------
     def _add(self, value, cat, repl):
         value = value.strip()
-        if not value or PLACEHOLDER.match(value) or "<" in value:
+        if not value or PLACEHOLDER.match(value) or "<" in value or \
+                PCI_ADDR.match(value):
             return
         self.literal.setdefault(value, (cat, repl))
 
@@ -227,7 +238,7 @@ class Redactor:
             for rx in USB_SERIAL_PATS:
                 for m in rx.finditer(t):
                     v = m.group(1).strip()
-                    if len(v) >= 4:
+                    if len(v) >= 5:     # not "0001" (P14s 2026-10-23)
                         self._add(v, "usb-serial", "X" * len(v))
             for m in WIN_INST.finditer(t):
                 inst = re.sub(r"&[0-9A-Fa-f]{1,3}$", "", m.group(2))
@@ -325,7 +336,8 @@ class Redactor:
 
         def mac(m):
             if m.group(0).lower() in ("00:00:00:00:00:00",
-                                      "ff:ff:ff:ff:ff:ff"):
+                                      "ff:ff:ff:ff:ff:ff") or \
+                    PCI_ADDR.match(m.group(0)):
                 return m.group(0)
             n[0] += 1
             return "<MAC>"
@@ -407,18 +419,12 @@ def format_log(log, title):
     return "\n".join(lines) + "\n"
 
 
-def main():
-    if len(sys.argv) not in (2, 3):
-        print(__doc__, file=sys.stderr)
-        return 2
-    root = sys.argv[1]
-    secrets = []
-    if len(sys.argv) == 3:
-        with open(sys.argv[2], encoding="utf-8", errors="replace") as f:
-            secrets = f.read().splitlines()
+def redact_dir(root, secrets=()):
+    """Redact the capture directory ROOT in place; return the log."""
     r = Redactor(secrets)
     files = []
-    for dirpath, _, names in os.walk(root):
+    for dirpath, dirs, names in os.walk(root):
+        dirs.sort()
         for name in sorted(names):
             path = os.path.join(dirpath, name)
             if name == "REDACTIONS.txt" or os.path.islink(path):
@@ -428,6 +434,7 @@ def main():
                 r.collect(path, f.read())
     r.finish()
     log = []
+    old_dirs = set()
     for path in files:
         with open(path, "rb") as f:
             data = f.read()
@@ -438,13 +445,121 @@ def main():
         rel = os.path.relpath(path, root)
         nrel = r.apply_name(rel)
         if nrel != rel:
-            os.rename(path, os.path.join(root, nrel))
+            # A scrubbed directory name moves every file under it: create
+            # the new parent, move the file, and remove the emptied old
+            # directories at the end, deepest first. Renaming only the file
+            # (as before 2026-10-23) fails when a parent name changed.
+            dst = os.path.join(root, nrel)
+            if os.path.lexists(dst):
+                raise RuntimeError("rename target exists: " + nrel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.rename(path, dst)
+            d = os.path.dirname(path)
+            while os.path.normpath(d) != os.path.normpath(root):
+                old_dirs.add(d)
+                d = os.path.dirname(d)
             counts["path"] = counts.get("path", 0) + 1
         if counts:
             log.append(((nrel if nrel != rel else rel).replace(os.sep, "/"),
                         counts))
+    for d in sorted(old_dirs, key=lambda x: -x.count(os.sep)):
+        try:
+            os.rmdir(d)
+        except OSError:
+            pass                 # not empty: unrenamed files stay there
     with open(os.path.join(root, "REDACTIONS.txt"), "w") as f:
         f.write(format_log(log, "redact.py"))
+    return log
+
+
+def self_test():
+    """The failing case of the 2026-10-23 P14s capture (an xHCI root hub
+    whose iSerial is its PCI address, and a directory named after that
+    address), plus a directory whose name holds a real USB serial.
+    Prints OK, or raises AssertionError."""
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="redact-selftest-")
+    try:
+        root = os.path.join(tmp, "cap")
+        # The capture's own name; pack.py turns ':' into '_' later, and
+        # Windows cannot hold ':' in a file name.
+        bdf = "0000:2b:00.0" if os.name != "nt" else "0000_2b_00.0"
+        dev = os.path.join("pci", "tb-complex-with-device", bdf)
+        files = {
+            "dmesg.txt": "usb usb3: SerialNumber: 0000:2b:00.0\n"
+                         "usb usb1: SerialNumber: 0000:00:14.0\n"
+                         "usb 1-9: SerialNumber: c2dda7a51436\n"
+                         "xhci_hcd 0000:2b:00.0: xHCI Host Controller\n"
+                         "e1000e 0000:00:1f.6 eth0: (PCI Express) "
+                         "8c:8c:aa:27:f8:13\n"
+                         "pci 0000:00:14.0: [8086:02ed]\n"
+                         "usb 1-8: SerialNumber: 0001\n"
+                         "hid-generic 0003:04F3:2D4A.0001: on "
+                         "usb-0000:00:14.0-6/input0\n",
+            "lsusb.txt": "  iSerial                 1 0000:00:14.0\n"
+                         "  iSerial                 3 c2dda7a51436\n",
+            os.path.join(dev, "config.bin"): "\x86\x80\xc1\x15" + "\0" * 60,
+            os.path.join(dev, "lspci.txt"): "2b:00.0 USB controller\n",
+            os.path.join(dev, "sysfs-attrs.txt"): "serial: 0000:2b:00.0\n",
+            os.path.join("usb", "c2dda7a51436", "a", "b.txt"): "x\n",
+            os.path.join("usb", "c2dda7a51436", "c.txt"): "y\n",
+        }
+        for rel, text in files.items():
+            p = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(text.encode("latin1"))
+        redact_dir(root, ["PF2ABCDE", "8c:8c:aa:27:f8:13", "0000:2b:00.0"])
+        got = {}
+        for dp, _, names in os.walk(root):
+            for n in names:
+                p = os.path.join(dp, n)
+                with open(p, "rb") as f:
+                    got[os.path.relpath(p, root).replace(os.sep, "/")] = \
+                        f.read().decode("latin1")
+        d = got["dmesg.txt"]
+        assert "usb usb3: SerialNumber: 0000:2b:00.0\n" in d, d
+        assert "usb usb1: SerialNumber: 0000:00:14.0\n" in d, d
+        assert "xhci_hcd 0000:2b:00.0:" in d, d
+        assert "pci 0000:00:14.0:" in d, d
+        assert "2D4A.0001: on usb-0000:00:14.0-6/" in d, d
+        assert "c2dda7a51436" not in d and "8c:8c:aa" not in d, d
+        assert "1 0000:00:14.0" in got["lsusb.txt"], got["lsusb.txt"]
+        pdir = "pci/tb-complex-with-device/" + bdf + "/"
+        for n in ("config.bin", "lspci.txt", "sysfs-attrs.txt"):
+            assert pdir + n in got, sorted(got)
+        assert "0000:2b:00.0" in got[pdir + "sysfs-attrs.txt"]
+        assert "usb/XXXXXXXXXXXX/a/b.txt" in got, sorted(got)
+        assert "usb/XXXXXXXXXXXX/c.txt" in got, sorted(got)
+        assert not os.path.exists(os.path.join(root, "usb", "c2dda7a51436"))
+        assert all("c2dda7a51436" not in k and "c2dda7a51436" not in v
+                   for k, v in got.items()), got
+        r = Redactor()
+        r.collect("dmesg.txt", files["dmesg.txt"].encode())
+        r.collect("lsusb.txt", files["lsusb.txt"].encode())
+        assert set(r.literal) == {"c2dda7a51436"}, r.literal
+        for a in ("0000:2b:00.0", "2b:00.0", "00:1f.6"):
+            assert PCI_ADDR.match(a), a
+        for a in ("8c:8c:aa:27:f8:13", "c2dda7a51436", "0001"):
+            assert not PCI_ADDR.match(a), a
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("redact.py self-test OK")
+    return 0
+
+
+def main():
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
+    if len(sys.argv) not in (2, 3):
+        print(__doc__, file=sys.stderr)
+        return 2
+    secrets = []
+    if len(sys.argv) == 3:
+        with open(sys.argv[2], encoding="utf-8", errors="replace") as f:
+            secrets = f.read().splitlines()
+    redact_dir(sys.argv[1], secrets)
     return 0
 
 

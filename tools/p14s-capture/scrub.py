@@ -16,7 +16,9 @@ Serial Number of Thunderbolt/USB4 controller functions are kept.
 
 Archives are rewritten with the same member order, names and metadata;
 only the content of changed members differs. The archive's REDACTIONS.txt
-gets a section listing the replacements per file and category, its
+gets a section listing the replacements per file and category (a tar
+archive without one, packed after redact.py failed on the machine, gets a
+new REDACTIONS.txt member next to MANIFEST.txt), its
 MANIFEST.txt / MANIFEST.sha256 gets the new hashes, and the sidecar
 NAME.sha256 is regenerated in its original format.
 
@@ -85,6 +87,19 @@ class Container:
                     self.files.append([i.orig_filename, z.read(i)])
         else:
             raise SystemExit("unsupported input: " + path)
+
+    def add_member(self, base, data):
+        """Add a regular file BASE beside the archive's MANIFEST.txt (tar
+        only), with that member's owner, mode and time."""
+        ref = next(m for m in self.members if m.isfile() and
+                   os.path.basename(m.name) in MANIFESTS)
+        m = tarfile.TarInfo(os.path.join(os.path.dirname(ref.name),
+                                         base).replace("\\", "/"))
+        for a in ("mode", "uid", "gid", "uname", "gname", "mtime"):
+            setattr(m, a, getattr(ref, a))
+        m.size = len(data)
+        self.members.append(m)
+        self.files.append([m.name, data])
 
     def write(self, out):
         data = {n: d for n, d in self.files}
@@ -214,6 +229,9 @@ def main(argv):
                 "%s %d" % kv for kv in sorted(counts.items()))))
         if mode == "dry-run" or not log:
             continue
+        if c.kind == "tar" and not any(
+                os.path.basename(n) == "REDACTIONS.txt" for n, _ in c.files):
+            c.add_member("REDACTIONS.txt", b"")
         for f in c.files:
             base = os.path.basename(f[0].replace("\\", "/"))
             if base == "REDACTIONS.txt" and c.kind != "dir":
@@ -221,11 +239,12 @@ def main(argv):
                 nl = b"\r\n" if b"\r\n" in old else b"\n"
                 add = redact.format_log(log, title).encode()
                 add = add.replace(b"\n", nl)
-                if not old.endswith(nl):
+                if old and not old.endswith(nl):
                     add = nl + add
                 nd = old + add
-                hashes[hashlib.sha256(old).hexdigest()] = \
-                    hashlib.sha256(nd).hexdigest()
+                if old:          # a new member is not in the manifest
+                    hashes[hashlib.sha256(old).hexdigest()] = \
+                        hashlib.sha256(nd).hexdigest()
                 f[1] = nd
         for f in c.files:
             base = os.path.basename(f[0].replace("\\", "/"))
