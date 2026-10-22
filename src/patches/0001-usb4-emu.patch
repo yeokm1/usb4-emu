@@ -1,6 +1,7 @@
 usb4-emu QEMU changes against v11.1.2
-Exported from branch usb4-emu at f381f01
+Exported from branch usb4-emu at c8d878e
 
+  c8d878e usb4: USB3 tunnel gate, hub subtrees, x-usb3-tunnel, preos-usb3, qtest
   f381f01 usb4: QMP fault injection on ring 0, x-cable, host resets, ICM mode
   f1e36f8 usb4: tb3-ice-lake, the Ice Lake firmware CM variant
   0702fa0 tests/qtest: cover RSM in x86-smm-tlb-test, gate it on VGA
@@ -3947,10 +3948,10 @@ index 0000000000000000000000000000000000000000..8f8591ad4e28e89a82aa16f8a5157a2d
 +type_init(dbg_register_types)
 diff --git a/hw/usb4/usb4-device.c b/hw/usb4/usb4-device.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea43633d4c4e0c
+index 0000000000000000000000000000000000000000..fac12a53b6d009fe2699ae70f842f0d5dbd99b52
 --- /dev/null
 +++ b/hw/usb4/usb4-device.c
-@@ -0,0 +1,662 @@
+@@ -0,0 +1,741 @@
 +/*
 + * USB4 / Thunderbolt 3 device router on the usb4 bus
 + *
@@ -4045,6 +4046,10 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +    USB4TunnelPort *dfp_target[USB4_DEV_MAX_DFP + 1];
 +    void *router;           /* fabric-owned router state, NULL = detached */
 +    bool cable_out;         /* x-cable off: pulled, stays unplugged */
++    /* USB3 tunnel as last reported by the fabric (x-usb3-tunnel) */
++    bool usb3_up;
++    USB4TunnelReason usb3_reason;
++    uint32_t usb3_ups, usb3_downs;
 +};
 +
 +USB4DeviceModel usb4_device_model(USB4Device *d)
@@ -4065,6 +4070,19 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +const char *usb4_device_usb3_devs(USB4Device *d)
 +{
 +    return d->usb3_devs;
++}
++
++void usb4_device_note_usb3(USB4Device *d, bool up, USB4TunnelReason why)
++{
++    if (up != d->usb3_up) {
++        if (up) {
++            d->usb3_ups++;
++        } else {
++            d->usb3_downs++;
++        }
++    }
++    d->usb3_up = up;
++    d->usb3_reason = why;
 +}
 +
 +USB4Dialect usb4_device_dialect(USB4Device *d)
@@ -4379,6 +4397,31 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +                   "dialect=usb4, downstream-ports=0 and dock=off");
 +        return;
 +    }
++    if (d->usb3_devs && *d->usb3_devs) {
++        /*
++         * A USB3 tunnel needs a USB3 Gen X Upstream adapter here and a
++         * USB3 Gen X Downstream adapter on the host router (Guide 5.5).
++         * A Thunderbolt 3 router has neither: USB reaches a TB3 dock
++         * through the PCIe tunnel to the dock's own xHCI (dock=on,
++         * usb-drive=). The ASM2464's DROM marks its adapter 4 unused
++         * (docs/captures/ORICO-ASM2464.md), and the firmware-CM hosts
++         * modelled here are Thunderbolt 3 host routers.
++         */
++        if (d->dialect != USB4_DIALECT_USB4 ||
++            d->model == USB4_DEVICE_MODEL_ASM2464) {
++            error_setg(errp, "usb4-device: usb3-dev needs a dialect=usb4 "
++                       "device router other than device-model=asm2464 "
++                       "(a TB3 dock carries USB in its PCIe tunnel: dock=on, "
++                       "usb-drive=)");
++            return;
++        }
++        if (usb4_host_profile(h) != USB4_PROFILE_USB4_GENERIC) {
++            error_setg(errp, "usb4-device: usb3-dev needs a "
++                       "profile=usb4-generic host (a Thunderbolt 3 host "
++                       "router has no USB3 adapters)");
++            return;
++        }
++    }
 +    if (d->parent) {
 +        Object *o = object_resolve_path_component(
 +            object_resolve_path("/machine/peripheral", NULL), d->parent);
@@ -4388,6 +4431,13 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +        if (!parent || parent->host != h) {
 +            error_setg(errp, "usb4-device: parent '%s' is not a usb4-device "
 +                       "on the same usb4-host", d->parent);
++            return;
++        }
++        if (d->usb3_devs && *d->usb3_devs &&
++            parent->dialect != USB4_DIALECT_USB4) {
++            error_setg(errp, "usb4-device %s: usb3-dev behind parent '%s', "
++                       "a dialect=tb3 router with no USB3 Downstream "
++                       "adapter", dev_id(d), d->parent);
 +            return;
 +        }
 +        if (would_adopt_ancestor(d, parent)) {
@@ -4407,6 +4457,12 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +                              d->dialect == USB4_DIALECT_TB3 ? "tb3" : "usb4",
 +                              d->drive ? d->drive : "(none)");
 +
++    /*
++     * Its USB devices start detached, before the router is plugged in:
++     * a firmware CM (preos-cm) may bring the USB3 tunnel up inside the
++     * attach below.
++     */
++    usb4_usb3_device_realized(d);
 +    f = usb4_host_get_fabric(h);
 +    if (!f) {
 +        /* Stub build without a fabric: keep the object, no link. */
@@ -4429,7 +4485,6 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +     */
 +    adopt_orphans(d, bus);
 +    attach_children(d, 0);
-+    usb4_usb3_device_realized(d);
 +}
 +
 +static void usb4_device_unrealize(DeviceState *dev)
@@ -4531,6 +4586,7 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +        usb4_usb3_device_unrealized(d);
 +        return true;
 +    }
++    usb4_usb3_device_realized(d);   /* before a firmware CM can act */
 +    if (d->parent_dev) {
 +        attach_child(d);
 +    } else if (!d->parent) {
@@ -4541,7 +4597,6 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +    }
 +    if (d->router) {
 +        attach_children(d, 0);
-+        usb4_usb3_device_realized(d);
 +    }
 +    return true;
 +}
@@ -4575,6 +4630,26 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +    return g_string_free(s, false);
 +}
 +
++/*
++ * Debug/test: the USB3 tunnel to this router as the fabric last reported
++ * it, the transitions seen, and whether the usb3-dev devices are on
++ * their xHCI ports now: "up reason=up ups=1 downs=0 attached=stor0:1".
++ */
++static char *usb4_device_get_usb3(Object *obj, Error **errp)
++{
++    static const char *const why[] = {
++        "up", "admin-down", "eject", "surprise",
++    };
++    USB4Device *d = USB4_DEVICE(obj);
++    g_autofree char *att = usb4_usb3_attached_str(d);
++
++    return g_strdup_printf("%s reason=%s ups=%u downs=%u attached=%s",
++                           d->usb3_up ? "up" : "down",
++                           d->usb3_reason < ARRAY_SIZE(why) ?
++                           why[d->usb3_reason] : "?",
++                           d->usb3_ups, d->usb3_downs, att);
++}
++
 +static void usb4_device_class_init(ObjectClass *klass, const void *data)
 +{
 +    DeviceClass *dc = DEVICE_CLASS(klass);
@@ -4583,6 +4658,11 @@ index 0000000000000000000000000000000000000000..eba4143d2c43a17fc218406e3eea4363
 +                                   usb4_device_get_attached, NULL);
 +    object_class_property_add_str(klass, "x-pcie-down",
 +                                  usb4_device_get_pcie_down, NULL);
++    object_class_property_add_str(klass, "x-usb3-tunnel",
++                                  usb4_device_get_usb3, NULL);
++    object_class_property_set_description(klass, "x-usb3-tunnel",
++        "Debug/test: USB3 tunnel state, transitions and usb3-dev attach "
++        "state (docs/USB3-TUNNEL.md)");
 +    object_class_property_add_bool(klass, "x-cable", usb4_device_get_cable,
 +                                   usb4_device_set_cable_prop);
 +    object_class_property_set_description(klass, "x-cable",
@@ -9641,10 +9721,10 @@ index 0000000000000000000000000000000000000000..3e94279e23d6a66baf8f359d4cb2577d
 +#endif
 diff --git a/hw/usb4/usb4-host.c b/hw/usb4/usb4-host.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..74f5114b08f6e250b503d8ba811f8c74e3a6eafe
+index 0000000000000000000000000000000000000000..76792dcad9a91f1aeec9987831a0395a7d96c109
 --- /dev/null
 +++ b/hw/usb4/usb4-host.c
-@@ -0,0 +1,3244 @@
+@@ -0,0 +1,3247 @@
 +/*
 + * USB4 / Thunderbolt 3 host interface (the "NHI" PCI function)
 + *
@@ -9989,6 +10069,7 @@ index 0000000000000000000000000000000000000000..74f5114b08f6e250b503d8ba811f8c74
 +    bool asm_quirk_e2e;         /* asm4242 quirk b: Tx E2E never credited */
 +    bool intx_on;               /* advertise and assert INTA# */
 +    bool preos_cm;              /* firmware CM before the OS (usb4-preos.c) */
++    bool preos_usb3;            /* ... which also builds USB3 tunnels */
 +    uint32_t num_ports;
 +    char *tunnel_port_id;       /* tunnel target for USB4 port 1 */
 +    char *tunnel_port2_id;      /* tunnel target for USB4 port 2 */
@@ -12522,6 +12603,7 @@ index 0000000000000000000000000000000000000000..74f5114b08f6e250b503d8ba811f8c74
 +    cfg.host_domain = s->host_domain;
 +    cfg.asm4242 = s->asm_cfg;
 +    cfg.preos_cm = s->preos_cm && s->profile == USB4_PROFILE_USB4_GENERIC;
++    cfg.preos_usb3 = cfg.preos_cm && s->preos_usb3;
 +    s->fabric = usb4_fabric_new(s, &cfg);
 +    if (!s->fabric) {
 +        warn_report_once("usb4-host: no fabric available (stub build); "
@@ -12742,6 +12824,7 @@ index 0000000000000000000000000000000000000000..74f5114b08f6e250b503d8ba811f8c74
 +    DEFINE_PROP_STRING("host-model", USB4Host, host_model_str),
 +    DEFINE_PROP_UINT8("host-domain", USB4Host, host_domain, 0),
 +    DEFINE_PROP_BOOL("preos-cm", USB4Host, preos_cm, false),
++    DEFINE_PROP_BOOL("preos-usb3", USB4Host, preos_usb3, false),
 +    /*
 +     * host-model=asm4242 (docs/USB4-HOSTS.md 5). Adapter numbers are
 +     * inferred; quirks default to the hedges of AM5-USB4.md 8 (on).
@@ -14193,10 +14276,10 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +}
 diff --git a/hw/usb4/usb4-internal.h b/hw/usb4/usb4-internal.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f7d2a7245e4e43f6dfa6d8cc8411558af8f02d80
+index 0000000000000000000000000000000000000000..c2d12ad9d627f1f22fe130a7a86d5a52e0908277
 --- /dev/null
 +++ b/hw/usb4/usb4-internal.h
-@@ -0,0 +1,608 @@
+@@ -0,0 +1,618 @@
 +/*
 + * USB4 / Thunderbolt 3 host emulation - internal interfaces
 + *
@@ -14452,6 +14535,11 @@ index 0000000000000000000000000000000000000000..f7d2a7245e4e43f6dfa6d8cc8411558a
 +     * (docs/USB4-HOSTS.md, usb4-preos.c).
 +     */
 +    bool preos_cm;
++    /*
++     * preos-usb3: that firmware CM also builds a USB3 tunnel to every
++     * device router with a USB3 Gen X Upstream adapter (usb4-preos.c).
++     */
++    bool preos_usb3;
 +} USB4FabricConfig;
 +
 +USB4Fabric *usb4_fabric_new(USB4Host *h, const USB4FabricConfig *cfg);
@@ -14701,13 +14789,18 @@ index 0000000000000000000000000000000000000000..f7d2a7245e4e43f6dfa6d8cc8411558a
 +/*
 + * USB3 tunneling (usb4-usb3.c). Fabric -> device router: the USB3 Gen X
 + * tunnel to @d changed state. Called synchronously from the fabric (may
-+ * be MMIO context); attach/detach of the USB devices behind the
-+ * enclosure runs from a bottom half.
++ * be MMIO context): going down detaches the USB devices behind the
++ * enclosure in this call (the gate), coming up attaches them from a
++ * bottom half.
 + */
 +void usb4_device_usb3_tunnel(USB4Device *d, USB4TunnelState st,
 +                             USB4TunnelReason why);
-+/* Comma-separated ids of the USB devices behind @d ("usb3-dev"), or NULL */
++/* ':'-separated ids of the USB devices behind @d ("usb3-dev"), or NULL */
 +const char *usb4_device_usb3_devs(USB4Device *d);
++/* usb4-device.c: record a USB3 tunnel transition (x-usb3-tunnel) */
++void usb4_device_note_usb3(USB4Device *d, bool up, USB4TunnelReason why);
++/* "id:1 id2:0 ..." attached state of @d's usb3-dev devices (g_free) */
++char *usb4_usb3_attached_str(USB4Device *d);
 +/* usb4-device realize/unrealize: register / forget @d's USB devices */
 +void usb4_usb3_device_realized(USB4Device *d);
 +void usb4_usb3_device_unrealized(USB4Device *d);
@@ -14807,10 +14900,10 @@ index 0000000000000000000000000000000000000000..f7d2a7245e4e43f6dfa6d8cc8411558a
 +#endif /* HW_USB4_INTERNAL_H */
 diff --git a/hw/usb4/usb4-preos.c b/hw/usb4/usb4-preos.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..39a13a58b74719a9aa01ec0ab28810b8f93a79f2
+index 0000000000000000000000000000000000000000..d9023eec26b9d5fe174c68c7906db3b0662fb0fa
 --- /dev/null
 +++ b/hw/usb4/usb4-preos.c
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,242 @@
 +/*
 + * USB4 fabric: emulated pre-OS (platform firmware) connection manager
 + *
@@ -14826,6 +14919,10 @@ index 0000000000000000000000000000000000000000..39a13a58b74719a9aa01ec0ab28810b8
 + * brings up a PCIe tunnel to each device router, then hands over without
 + * cleaning up. The OS CM finds a configured fabric, no pending hot plug
 + * events, and the endpoints already on the PCI bus (cold plugged).
++ * With preos-usb3=on it also builds a USB3 tunnel to each device router
++ * with a USB3 Gen X Upstream adapter (Guide 5.5.1), as a BIOS that boots
++ * from USB behind a dock does; the OS CM finds it with the PCIe tunnel
++ * (Guide 4.2, discovery of existing tunnels).
 + *
 + * Like the emulated ICM it programs the same router state a guest CM
 + * writes, through the routers' own register semantics, so the tunnel
@@ -14869,10 +14966,15 @@ index 0000000000000000000000000000000000000000..39a13a58b74719a9aa01ec0ab28810b8
 +    return 0;
 +}
 +
-+/* Guide 5.2.1: one path entry, single read then single write. */
-+static void program_path(USB4Router *r, unsigned adp, unsigned hop,
-+                         unsigned out_adp, unsigned out_hop, unsigned credits,
-+                         bool lane_ingress)
++/*
++ * Guide 5.2.1: one path entry, single read then single write. Priority 3
++ * and IFC/EFC per segment for both kinds; weight 1 for PCIe (Table 5-2),
++ * 2 for USB3 (Table 5-4, as Linux tunnel.c tb_usb3_init_path).
++ */
++static void program_path_w(USB4Router *r, unsigned adp, unsigned hop,
++                           unsigned out_adp, unsigned out_hop,
++                           unsigned credits, bool lane_ingress,
++                           unsigned weight)
 +{
 +    uint32_t e[2];
 +
@@ -14882,10 +14984,16 @@ index 0000000000000000000000000000000000000000..39a13a58b74719a9aa01ec0ab28810b8
 +    if (lane_ingress) {
 +        e[0] |= credits << 17;
 +    }
-+    /* Guide Table 5-2: priority 3, weight 1, IFC/EFC per segment */
-+    e[1] = (e[1] & ~0x0f000f0fu) | 1 | (3 << 8) |
++    e[1] = (e[1] & ~0x0f000f0fu) | weight | (3 << 8) |
 +           (lane_ingress ? (1u << 24) : (1u << 25 | 1u << 27));
 +    usb4_router_write(r, USB4_CS_PATH, adp, 2 * hop, 2, e);
++}
++
++static void program_path(USB4Router *r, unsigned adp, unsigned hop,
++                         unsigned out_adp, unsigned out_hop, unsigned credits,
++                         bool lane_ingress)
++{
++    program_path_w(r, adp, hop, out_adp, out_hop, credits, lane_ingress, 1);
 +}
 +
 +/* Guide 3.2.1 step 4: one write of ROUTER_CS_1-4. */
@@ -14946,6 +15054,44 @@ index 0000000000000000000000000000000000000000..39a13a58b74719a9aa01ec0ab28810b8
 +    }
 +}
 +
++/*
++ * Guide 5.5.1: USB3 tunnel from @p's USB3 Gen X Down adapter of @dfp to
++ * @d's USB3 Gen X Up adapter. Bandwidth first (Spec Table 8-14, on the
++ * Downstream adapter: Connection Manager Request, Host Controller Ack,
++ * scale 0 and 9000 Mb/s each way, which is 275 units of 512 bytes per
++ * 125 us, request cleared), then HopID 8 paths both ways with HopIDs 10
++ * (down) and 11 (up) on the link, next to the PCIe tunnel's 8 and 9, then
++ * Path Enable with Valid on the Down adapter and then the Up adapter.
++ */
++static void usb3_tunnel(USB4Router *p, USB4Port *dfp, USB4Router *d)
++{
++    USB4Adapter *ud = usb4_router_find_kind(p, USB4_ADP_USB3_DOWN,
++                                            dfp->index);
++    USB4Adapter *uu = usb4_router_find_kind(d, USB4_ADP_USB3_UP, 1);
++    unsigned pl = dfp->lane[0]->num, ul = d->up_port->lane[0]->num;
++    unsigned cd, cu;
++
++    if (!ud || !uu) {
++        return;
++    }
++    cd = find_cap(p, ud->num, USB4_CAP_PROTO);
++    cu = find_cap(d, uu->num, USB4_CAP_PROTO);
++    if (!cd || !cu) {
++        return;
++    }
++    rmw(p, USB4_CS_ADAPTER, ud->num, cd + 2, 0, 1u << 31);      /* CMR */
++    rmw(p, USB4_CS_ADAPTER, ud->num, cd + 3, 0x3f, 0);          /* scale */
++    rmw(p, USB4_CS_ADAPTER, ud->num, cd + 2, 0xffffff,
++        275 | (275u << 12));
++    rmw(p, USB4_CS_ADAPTER, ud->num, cd + 2, 1u << 31, 0);
++    program_path_w(p, ud->num, 8, pl, 10, 0, false, 2);
++    program_path_w(d, ul, 10, uu->num, 8, 16, true, 2);
++    program_path_w(d, uu->num, 8, ul, 11, 0, false, 2);
++    program_path_w(p, pl, 11, ud->num, 8, 16, true, 2);
++    rmw(p, USB4_CS_ADAPTER, ud->num, cd, 0, 3u << 30);          /* PE, V */
++    rmw(d, USB4_CS_ADAPTER, uu->num, cu, 0, 3u << 30);
++}
++
 +static void bring_up(USB4Router *p, USB4Port *dfp)
 +{
 +    USB4Router *d;
@@ -14964,11 +15110,18 @@ index 0000000000000000000000000000000000000000..39a13a58b74719a9aa01ec0ab28810b8
 +    /* Guide 3.2.1: clear Lock on the DFP lane adapter, enumerate */
 +    rmw(p, USB4_CS_ADAPTER, dfp->lane[0]->num, 4, 1u << 31, 0);
 +    enumerate(d, route, depth);
-+    /* Guide 3.2.3: PCIe tunneling on, Configuration Valid */
-+    rmw(d, USB4_CS_ROUTER, 0, 5, 0, 1u << 24);
++    /*
++     * Guide 3.2.3: PCIe tunneling on (and USB3 tunneling, with
++     * preos-usb3), then Configuration Valid
++     */
++    rmw(d, USB4_CS_ROUTER, 0, 5, 0, 1u << 24 |
++        (p->fabric->cfg.preos_usb3 ? 1u << 25 : 0));
 +    rmw(d, USB4_CS_ROUTER, 0, 5, 0, 1u << 31);
 +    bond(p, dfp, d);
 +    pcie_tunnel(p, dfp, d);
++    if (p->fabric->cfg.preos_usb3) {
++        usb3_tunnel(p, dfp, d);
++    }
 +    trace_usb4_preos_router(route, depth);
 +    for (unsigned i = 1; i < d->nports; i++) {
 +        bring_up(d, &d->ports[i]);
@@ -17106,10 +17259,10 @@ index 0000000000000000000000000000000000000000..11158b46574dd8509b058f62871b4654
 +}
 diff --git a/hw/usb4/usb4-router.c b/hw/usb4/usb4-router.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1ac3794ef51e3f4c88d45a491d0c27080deb1202
+index 0000000000000000000000000000000000000000..0cbcd3e71652f636b0f3acdb1eb0a4307bec85f4
 --- /dev/null
 +++ b/hw/usb4/usb4-router.c
-@@ -0,0 +1,1766 @@
+@@ -0,0 +1,1768 @@
 +/*
 + * USB4 router model: Router, Adapter and Path configuration spaces,
 + * Router Operations and USB4 Port sideband (Port Operations)
@@ -17153,8 +17306,10 @@ index 0000000000000000000000000000000000000000..1ac3794ef51e3f4c88d45a491d0c2708
 + * adapter is backed by a tunnel port. The USB3 adapters exist because the
 + * Windows CM rejects a host router without one USB3 Gen X Downstream
 + * adapter per USB4 port (observed: "Unexpected number of USB3 down
-+ * adapters" assertion, PcieUsbSegmentManager::ValidateAdapters); there
-+ * is no USB3 host controller behind them.
++ * adapters" assertion, PcieUsbSegmentManager::ValidateAdapters). What
++ * sits behind them is QEMU USB devices on a qemu-xhci, named on the
++ * device router (usb3-dev) and attached while its USB3 tunnel is up
++ * (usb4-usb3.c); no xHCI register reflects the tunnel.
 + *
 + * Device router with D downstream USB4 ports (D = 0 for a plain
 + * enclosure, D >= 1 for a daisy-chainable one):
@@ -23997,10 +24152,10 @@ index 0000000000000000000000000000000000000000..7bacec2b9cc1fb99611f4061056d659f
 +}
 diff --git a/hw/usb4/usb4-usb3.c b/hw/usb4/usb4-usb3.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..a9daede466989b22bd2e78e5e635253920d16c97
+index 0000000000000000000000000000000000000000..04e3e429c76130df96bf592a61a748dc08e4dc02
 --- /dev/null
 +++ b/hw/usb4/usb4-usb3.c
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,360 @@
 +/*
 + * USB4 USB3 tunneling: QEMU USB devices behind a device router
 + *
@@ -24020,10 +24175,18 @@ index 0000000000000000000000000000000000000000..a9daede466989b22bd2e78e5e6352539
 + *    them on the device router (usb4-device,...,usb3-dev=stor0[:id2...]);
 + *  - those devices are kept detached from their port (usb_device_detach,
 + *    port stays claimed) except while the fabric reports the USB3 tunnel
-+ *    to that device router up (usb4-fabric-usb3.c);
-+ *  - attach/detach runs from a bottom half, never from the MMIO context
-+ *    that changed the fabric state, and at system reset (the fabric is
-+ *    reset at the same time, so every tunnel is down).
++ *    to that device router up (usb4-fabric-usb3.c); a named usb-hub
++ *    takes every device behind it along (the enclosure's hub and what
++ *    is plugged into it), children detached first and attached last;
++ *  - the gate closes at once (AGENTS.md "Gate before you unplug"): a
++ *    tunnel going down detaches the devices inside the call that changed
++ *    the fabric state, so the xHCI reports the disconnect and no further
++ *    transfer reaches them. That is a port-level detach (the xHCI
++ *    cancels the device's transfers as for a guest port disable); no
++ *    device is realized or removed. Attach, the "insert", runs from a
++ *    bottom half, never from the MMIO context that changed the fabric
++ *    state, and the state is applied again at system reset (the fabric
++ *    is reset at the same time, so every tunnel is down).
 + *
 + * The desired state is kept per USB device id, not per device router, so
 + * a pending bottom half after device_del of the router still converges
@@ -24089,6 +24252,82 @@ index 0000000000000000000000000000000000000000..a9daede466989b22bd2e78e5e6352539
 +    return USB_DEVICE(ds);
 +}
 +
++static gint usb3_depth_cmp(gconstpointer a, gconstpointer b)
++{
++    const USBDevice *x = *(USBDevice *const *)a;
++    const USBDevice *y = *(USBDevice *const *)b;
++
++    return (int)strlen(x->port->path) - (int)strlen(y->port->path);
++}
++
++/*
++ * @dev and every USB device behind it on the same bus (a hub's
++ * downstream devices have port paths "<hub path>.<n>"), shallowest
++ * first.
++ */
++static GPtrArray *usb3_subtree(USBDevice *dev)
++{
++    BusState *bus = qdev_get_parent_bus(DEVICE(dev));
++    g_autofree char *pfx = g_strdup_printf("%s.", dev->port->path);
++    GPtrArray *a = g_ptr_array_new();
++    BusChild *kid;
++
++    g_ptr_array_add(a, dev);
++    QTAILQ_FOREACH(kid, &bus->children, sibling) {
++        USBDevice *u = (USBDevice *)object_dynamic_cast(OBJECT(kid->child),
++                                                        TYPE_USB_DEVICE);
++
++        if (u && u != dev && u->port && DEVICE(u)->realized &&
++            g_str_has_prefix(u->port->path, pfx)) {
++            g_ptr_array_add(a, u);
++        }
++    }
++    g_ptr_array_sort(a, usb3_depth_cmp);
++    return a;
++}
++
++/* Bring the device @id and everything behind it to @want. */
++static void usb3_apply_one(const char *id, bool want)
++{
++    USBDevice *dev = usb3_find(id);
++    g_autoptr(GPtrArray) sub = NULL;
++
++    if (!dev || !DEVICE(dev)->realized || !dev->port) {
++        trace_usb4_usb3_apply(id, "not found (yet)");
++        return;
++    }
++    sub = usb3_subtree(dev);
++    if (want) {
++        for (unsigned i = 0; i < sub->len; i++) {
++            USBDevice *u = g_ptr_array_index(sub, i);
++            Error *err = NULL;
++
++            if (u->attached) {
++                continue;
++            }
++            usb_device_attach(u, &err);
++            if (err) {
++                warn_report_err(err);
++                trace_usb4_usb3_apply(DEVICE(u)->id ? DEVICE(u)->id : id,
++                                      "attach failed");
++                return;     /* nothing deeper without its parent */
++            }
++            trace_usb4_usb3_apply(DEVICE(u)->id ? DEVICE(u)->id : id,
++                                  "attached");
++        }
++    } else {
++        for (unsigned i = sub->len; i-- > 0;) {
++            USBDevice *u = g_ptr_array_index(sub, i);
++
++            if (u->attached) {
++                usb_device_detach(u);
++                trace_usb4_usb3_apply(DEVICE(u)->id ? DEVICE(u)->id : id,
++                                      "detached");
++            }
++        }
++    }
++}
++
 +static void usb3_apply(void)
 +{
 +    GHashTableIter it;
@@ -24099,30 +24338,7 @@ index 0000000000000000000000000000000000000000..a9daede466989b22bd2e78e5e6352539
 +    }
 +    g_hash_table_iter_init(&it, usb3_want);
 +    while (g_hash_table_iter_next(&it, &key, &val)) {
-+        const char *id = key;
-+        bool want = GPOINTER_TO_INT(val) - 1;
-+        USBDevice *dev = usb3_find(id);
-+        Error *err = NULL;
-+
-+        if (!dev || !DEVICE(dev)->realized || !dev->port) {
-+            trace_usb4_usb3_apply(id, "not found (yet)");
-+            continue;
-+        }
-+        if (want == dev->attached) {
-+            continue;
-+        }
-+        if (want) {
-+            usb_device_attach(dev, &err);
-+            if (err) {
-+                warn_report_err(err);
-+                trace_usb4_usb3_apply(id, "attach failed");
-+                continue;
-+            }
-+            trace_usb4_usb3_apply(id, "attached");
-+        } else {
-+            usb_device_detach(dev);
-+            trace_usb4_usb3_apply(id, "detached");
-+        }
++        usb3_apply_one(key, GPOINTER_TO_INT(val) - 1);
 +    }
 +}
 +
@@ -24143,6 +24359,10 @@ index 0000000000000000000000000000000000000000..a9daede466989b22bd2e78e5e6352539
 +        g_hash_table_insert(usb3_want, g_strdup(ids[i]),
 +                            GINT_TO_POINTER(1 + attach));
 +        trace_usb4_usb3_want(ids[i], attach);
++        if (!attach) {
++            /* The gate: gone from the xHCI before this call returns. */
++            usb3_apply_one(ids[i], false);
++        }
 +    }
 +    qemu_bh_schedule(usb3_bh);
 +}
@@ -24150,7 +24370,37 @@ index 0000000000000000000000000000000000000000..a9daede466989b22bd2e78e5e6352539
 +void usb4_device_usb3_tunnel(USB4Device *d, USB4TunnelState st,
 +                             USB4TunnelReason why)
 +{
++    usb4_device_note_usb3(d, st == USB4_TUNNEL_UP, why);
 +    usb3_set_want(d, st == USB4_TUNNEL_UP);
++}
++
++/*
++ * Whether every USB device named in @d's usb3-dev (and what sits behind
++ * a named hub) is attached, as "id:1" / "id:0" / "id:-" (not found)
++ * items separated by spaces.
++ */
++char *usb4_usb3_attached_str(USB4Device *d)
++{
++    const char *list = usb4_device_usb3_devs(d);
++    g_auto(GStrv) ids = NULL;
++    GString *s = g_string_new("");
++
++    if (!list || !*list) {
++        return g_string_free(s, false);
++    }
++    ids = g_strsplit(list, ":", -1);
++    for (unsigned i = 0; ids[i]; i++) {
++        USBDevice *dev;
++
++        if (!*ids[i]) {
++            continue;
++        }
++        dev = usb3_find(ids[i]);
++        g_string_append_printf(s, "%s%s:%s", s->len ? " " : "", ids[i],
++                               !dev || !dev->port ? "-" :
++                               dev->attached ? "1" : "0");
++    }
++    return g_string_free(s, false);
 +}
 +
 +void usb4_usb3_device_realized(USB4Device *d)
@@ -25023,7 +25273,7 @@ index 4bbe18a86fbb8e10204829f373374a8a9194fafe..e9ac59fccecb862b8af6d9c7588eaad4
      qemu_log_mask(CPU_LOG_INT, "SMM: after RSM\n");
      log_cpu_state_mask(CPU_LOG_INT, CPU(cpu), CPU_DUMP_CCOP);
 diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
-index 78b30106496367362132cbdbfa6c535983241759..cdcfeb15ef4fd210efd2b5fbbaa6f53bfdb90da7 100644
+index 78b30106496367362132cbdbfa6c535983241759..ca3a018885a8f7ac49acbc5ccdad1bd7d663bcc1 100644
 --- a/tests/qtest/meson.build
 +++ b/tests/qtest/meson.build
 @@ -17,6 +17,7 @@ slow_qtests = {
@@ -25044,7 +25294,7 @@ index 78b30106496367362132cbdbfa6c535983241759..cdcfeb15ef4fd210efd2b5fbbaa6f53b
    (config_all_devices.has_key('CONFIG_I440FX') ? ['ide-test'] : []) +                       \
    (config_all_devices.has_key('CONFIG_I440FX') ? ['numa-test'] : []) +                      \
    (config_all_devices.has_key('CONFIG_I440FX') ? ['test-x86-cpuid-compat'] : []) +          \
-@@ -74,9 +78,20 @@ qtests_i386 = \
+@@ -74,9 +78,21 @@ qtests_i386 = \
    (config_all_devices.has_key('CONFIG_WDT_IB700') ? ['wdt_ib700-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_PVPANIC_ISA') ? ['pvpanic-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_PVPANIC_PCI') ? ['pvpanic-pci-test'] : []) +          \
@@ -25062,6 +25312,7 @@ index 78b30106496367362132cbdbfa6c535983241759..cdcfeb15ef4fd210efd2b5fbbaa6f53b
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-asm2464-test'] : []) +               \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-tb3dev-test'] : []) +                \
 +  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-root-hotplug-test'] : []) +          \
++  (config_all_devices.has_key('CONFIG_USB4') ? ['usb4-usb3-test'] : []) +                  \
    (config_all_devices.has_key('CONFIG_LPC_ICH9') ? ['lpc-ich9-test'] : []) +              \
    (config_all_devices.has_key('CONFIG_MC146818RTC') ? ['rtc-test'] : []) +                  \
    (config_all_devices.has_key('CONFIG_USB_UHCI') ? ['usb-hcd-uhci-test'] : []) +            \
@@ -38723,6 +38974,1524 @@ index 0000000000000000000000000000000000000000..3c9c2328bb6bd127a4423f8017828a45
 +    qtest_add_func("/usb4-device/chain-failed-adopt",
 +                   test_chain_failed_adopt);
 +    qtest_add_func("/usb4-tunnel-dsp/stale-unregister", test_chain_stale_dsp);
++    return g_test_run();
++}
+diff --git a/tests/qtest/usb4-usb3-test.c b/tests/qtest/usb4-usb3-test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e2e90e7dcc77244596a9a9b71cafb2a90866d03
+--- /dev/null
++++ b/tests/qtest/usb4-usb3-test.c
+@@ -0,0 +1,1512 @@
++/*
++ * qtest for USB3 tunneling (docs/USB3-TUNNEL.md): QEMU USB devices on a
++ * qemu-xhci appear while a connection manager has the USB3 Gen X tunnel
++ * to their device router up, and go away when it goes down.
++ *
++ * Copyright (c) 2026 usb4-emu contributors
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Written from scratch for the usb4-emu project. A software connection
++ * manager over ring 0 (usb4-generic, i440FX) builds the tunnel as the
++ * Connection Manager Guide 2.0 section 5.5.1 and xHCI98's tbt_u4cm.c do
++ * (USB3 Tunneling On, bandwidth handshake, HopID 8 paths both ways at
++ * weight 2, Path Enable with Valid on the Down adapter, then the Up
++ * adapter) and takes it down (5.5.2); a small xHCI driver then addresses
++ * the usb-storage behind the tunnel and reads sectors with bulk-only
++ * SCSI commands (the data through the tunnel). Covered: setup, data,
++ * teardown, surprise unplug (device_del, x-cable), a fault rule
++ * combined with it (docs/FAULTS.md), a usb-hub subtree, system reset,
++ * the pre-OS firmware CM's USB3 tunnel (preos-usb3), configuration
++ * refusals, and the Thunderbolt 3 half: under the firmware CM (Alpine
++ * Ridge with approve, Ice Lake at plug) USB reaches a TB3 dock through
++ * the PCIe tunnel to the dock's own xHCI.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/bswap.h"
++#include "libqtest.h"
++#include "libqos/malloc-pc.h"
++#include "qobject/qdict.h"
++
++#define MS              (1000 * 1000LL)
++
++/* NHI (host interface) BAR0 and ring registers, Spec Table 12-10 */
++#define NHI_BAR         0xd0000000u
++#define NHI_DEVFN       (4 << 3)
++#define TX_RING(n)      (0x00000 + (n) * 0x10)
++#define RX_RING(n)      (0x08000 + (n) * 0x10)
++#define  RING_BASE_LO   0x0
++#define  RING_BASE_HI   0x4
++#define  RING_INDEX     0x8
++#define  RING_SIZE      0xc
++#define TX_CTRL(n)      (0x19800 + (n) * 0x20)
++#define RX_CTRL(n)      (0x29800 + (n) * 0x20)
++#define RX_PDF(n)       (0x29804 + (n) * 0x20)
++#define RING_VALID      (1u << 31)
++#define RING_RAW        (1u << 30)
++#define INMAIL_DATA     0x39900
++#define INMAIL_CMD      0x39904
++#define DESC_DD         (1u << 21)
++#define DESC_RS         (1u << 22)
++#define DESC_IE         (1u << 23)
++#define RING_N          16
++#define BUF_SIZE        256
++
++/* Control packets (Spec Table 6-3), config spaces (6.4.2.2) */
++#define PDF_READ        1
++#define PDF_WRITE       2
++#define PDF_NOTIFY      3
++#define PDF_HOTPLUG     5
++#define PDF_ICM_EVENT   10
++#define PDF_ICM_CMD     11
++#define PDF_ICM_RESP    12
++#define CS_PATH         0
++#define CS_ADAPTER      1
++#define CS_ROUTER       2
++#define CAP_PROTO       4
++
++/*
++ * Adapters (hw/usb4/usb4-router.c layouts): minimal host with two USB4
++ * ports, USB3 Gen X Down for port 1 = 8; plain device router, lane 0 =
++ * 1, USB3 Gen X Up = 4.
++ */
++#define H_LANE          1
++#define H_USB3          8
++#define D_LANE          1
++#define D_USB3          4
++/* ADP_USB3_GX_CS_0..4 (Spec Table 8-14), relative to the capability */
++#define USB3_PE         (1u << 31)
++#define USB3_V          (1u << 30)
++#define USB3_HCA        (1u << 31)      /* CS_1 */
++#define USB3_CMR        (1u << 31)      /* CS_2 */
++#define USB3_ULV        (1u << 7)       /* CS_4 */
++/* ROUTER_CS_5 / _6 (Spec Table 8-11 / 8-12) */
++#define RT_PTO          (1u << 24)
++#define RT_UTO          (1u << 25)
++#define RT_CV           (1u << 31)
++#define RT_CR           (1u << 25)
++/* Lane HopIDs of the USB3 paths, as a CM allocates them (not 8 on purpose) */
++#define HOP_DOWN        9
++#define HOP_UP          10
++
++#define XHCI_BAR        0xd1000000u
++#define XHCI_DEVFN      (5 << 3)
++#define ENC0            "/machine/peripheral/enc0"
++#define U4              "/machine/peripheral/u4"
++
++typedef struct T {
++    QTestState *qts;
++    QGuestAllocator alloc;
++    uint64_t tx_ring, rx_ring, tx_buf, rx_buf;
++    unsigned tx_pi, rx_ci, rx_next;
++    unsigned hp;                    /* hot plug events acknowledged */
++    uint32_t last_hp;               /* the last one's dword 2 */
++    char *img;
++} T;
++
++/* ------------------------------------------------------------------ */
++/* Helpers                                                              */
++/* ------------------------------------------------------------------ */
++
++static uint32_t cfg_addr(int bus, int devfn, int off)
++{
++    return 0x80000000u | (bus << 16) | (devfn << 8) | (off & 0xfc);
++}
++
++static uint32_t cfg_readl(T *t, int bus, int devfn, int off)
++{
++    qtest_outl(t->qts, 0xcf8, cfg_addr(bus, devfn, off));
++    return qtest_inl(t->qts, 0xcfc);
++}
++
++static void cfg_writel(T *t, int bus, int devfn, int off, uint32_t val)
++{
++    qtest_outl(t->qts, 0xcf8, cfg_addr(bus, devfn, off));
++    qtest_outl(t->qts, 0xcfc, val);
++}
++
++static void step(T *t, int64_t ms)
++{
++    qtest_clock_step(t->qts, ms * MS);
++}
++
++static char *qom_get_str(T *t, const char *path, const char *prop)
++{
++    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-get', 'arguments': "
++                           "{'path': %s, 'property': %s}}", path, prop);
++    char *s = g_strdup(qdict_get_str(rsp, "return"));
++
++    qobject_unref(rsp);
++    return s;
++}
++
++static bool qom_get_bool(T *t, const char *path, const char *prop)
++{
++    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-get', 'arguments': "
++                           "{'path': %s, 'property': %s}}", path, prop);
++    bool b = qdict_get_bool(rsp, "return");
++
++    qobject_unref(rsp);
++    return b;
++}
++
++static void qom_set_str(T *t, const char *path, const char *prop,
++                        const char *val)
++{
++    qtest_qmp_assert_success(t->qts, "{'execute': 'qom-set', 'arguments': "
++                             "{'path': %s, 'property': %s, 'value': %s}}",
++                             path, prop, val);
++}
++
++static void qom_set_bool(T *t, const char *path, const char *prop, bool val)
++{
++    qtest_qmp_assert_success(t->qts, "{'execute': 'qom-set', 'arguments': "
++                             "{'path': %s, 'property': %s, 'value': %i}}",
++                             path, prop, val);
++}
++
++static bool peripheral_exists(T *t, const char *id)
++{
++    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
++    QDict *rsp = qtest_qmp(t->qts, "{'execute': 'qom-list', 'arguments': "
++                           "{'path': %s}}", path);
++    bool ok = qdict_haskey(rsp, "return");
++
++    qobject_unref(rsp);
++    return ok;
++}
++
++/* x-usb3-tunnel of enc0 contains @needle (logged otherwise) */
++static bool usb3_has(T *t, const char *needle)
++{
++    g_autofree char *s = qom_get_str(t, ENC0, "x-usb3-tunnel");
++
++    if (!strstr(s, needle)) {
++        g_test_message("x-usb3-tunnel: %s (wanted %s)", s, needle);
++        return false;
++    }
++    return true;
++}
++
++/* USB device @id attached to its port */
++static bool usb_attached(T *t, const char *id)
++{
++    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
++
++    return qom_get_bool(t, path, "attached");
++}
++
++/* A raw 1 MiB image: sector n (n < 4) holds bytes (n * 37 + i) & 0xff */
++static char *make_img(void)
++{
++    char *name;
++    int fd = g_file_open_tmp("usb4-usb3-XXXXXX", &name, NULL);
++    g_autofree uint8_t *img = g_malloc0(1024 * 1024);
++    FILE *f;
++
++    g_assert(fd >= 0);
++    close(fd);
++    for (unsigned n = 0; n < 4; n++) {
++        for (unsigned i = 0; i < 512; i++) {
++            img[512 * n + i] = (n * 37 + i) & 0xff;
++        }
++    }
++    /* binary: a text-mode write() would expand 0x0a on Windows */
++    f = fopen(name, "wb");
++    g_assert(f);
++    g_assert_cmpuint(fwrite(img, 1, 1024 * 1024, f), ==, 1024 * 1024);
++    fclose(f);
++    return name;
++}
++
++static void t_stop(T *t)
++{
++    alloc_destroy(&t->alloc);
++    qtest_quit(t->qts);
++    unlink(t->img);
++    g_free(t->img);
++    g_free(t);
++}
++
++/* ------------------------------------------------------------------ */
++/* Ring 0 (raw mode), as tests/qtest/usb4-fault-test.c                 */
++/* ------------------------------------------------------------------ */
++
++static void nhi_wr(T *t, uint32_t off, uint32_t v)
++{
++    qtest_writel(t->qts, NHI_BAR + off, v);
++}
++
++static uint32_t nhi_rd(T *t, uint32_t off)
++{
++    return qtest_readl(t->qts, NHI_BAR + off);
++}
++
++static void desc_write(T *t, uint64_t ring, unsigned i, uint64_t addr,
++                       uint32_t dw2)
++{
++    uint64_t d = ring + i * 16;
++
++    qtest_writel(t->qts, d, (uint32_t)addr);
++    qtest_writel(t->qts, d + 4, addr >> 32);
++    qtest_writel(t->qts, d + 8, dw2);
++    qtest_writel(t->qts, d + 12, 0);
++}
++
++static void rx_post(T *t, unsigned n)
++{
++    while (n--) {
++        desc_write(t, t->rx_ring, t->rx_ci, t->rx_buf + t->rx_ci * BUF_SIZE,
++                   DESC_RS | DESC_IE);
++        t->rx_ci = (t->rx_ci + 1) % RING_N;
++    }
++    nhi_wr(t, RX_RING(0) + RING_INDEX, t->rx_ci);
++}
++
++/* Map the NHI and (re)start ring 0, e.g. after a host router reset */
++static void rings_setup(T *t, int bus, int devfn)
++{
++    cfg_writel(t, bus, devfn, 0x10, NHI_BAR);
++    cfg_writel(t, bus, devfn, 0x14, 0);
++    cfg_writel(t, bus, devfn, 0x04, 0x6);
++    if (!t->tx_ring) {
++        t->tx_ring = guest_alloc(&t->alloc, RING_N * 16);
++        t->rx_ring = guest_alloc(&t->alloc, RING_N * 16);
++        t->tx_buf = guest_alloc(&t->alloc, RING_N * BUF_SIZE);
++        t->rx_buf = guest_alloc(&t->alloc, RING_N * BUF_SIZE);
++    }
++    t->tx_pi = t->rx_ci = t->rx_next = 0;
++    nhi_wr(t, TX_RING(0) + RING_BASE_LO, (uint32_t)t->tx_ring);
++    nhi_wr(t, TX_RING(0) + RING_BASE_HI, t->tx_ring >> 32);
++    nhi_wr(t, TX_RING(0) + RING_SIZE, RING_N);
++    nhi_wr(t, TX_CTRL(0), RING_VALID | RING_RAW);
++    nhi_wr(t, RX_RING(0) + RING_BASE_LO, (uint32_t)t->rx_ring);
++    nhi_wr(t, RX_RING(0) + RING_BASE_HI, t->rx_ring >> 32);
++    nhi_wr(t, RX_RING(0) + RING_SIZE, RING_N | (BUF_SIZE << 16));
++    nhi_wr(t, RX_PDF(0), 0xffffffff);
++    nhi_wr(t, RX_CTRL(0), RING_VALID | RING_RAW);
++    rx_post(t, RING_N - 1);
++}
++
++static uint32_t crc32c(const uint8_t *p, size_t n)
++{
++    uint32_t c = 0xffffffff;
++
++    while (n--) {
++        c ^= *p++;
++        for (int b = 0; b < 8; b++) {
++            c = (c >> 1) ^ ((c & 1) ? 0x82f63b78 : 0);
++        }
++    }
++    return ~c;
++}
++
++static void tx_frame(T *t, unsigned pdf, const uint32_t *w, unsigned n)
++{
++    uint8_t buf[BUF_SIZE];
++    uint64_t b = t->tx_buf + t->tx_pi * BUF_SIZE;
++
++    for (unsigned i = 0; i < n; i++) {
++        stl_be_p(buf + 4 * i, w[i]);
++    }
++    stl_be_p(buf + 4 * n, crc32c(buf, 4 * n));
++    qtest_memwrite(t->qts, b, buf, 4 * n + 4);
++    desc_write(t, t->tx_ring, t->tx_pi, b,
++               (4 * n + 4) | (pdf << 12) | DESC_RS | DESC_IE);
++    t->tx_pi = (t->tx_pi + 1) % RING_N;
++    nhi_wr(t, TX_RING(0) + RING_INDEX, t->tx_pi << 16);
++}
++
++/* The next received frame: its PDF and words; 0 if none arrived. */
++static unsigned rx_recv(T *t, uint32_t *w, unsigned *n)
++{
++    unsigned i = t->rx_next, len, pdf;
++    uint32_t dw2;
++    uint8_t buf[BUF_SIZE];
++
++    if (((nhi_rd(t, RX_RING(0) + RING_INDEX) >> 16) & 0xffff) == i) {
++        return 0;
++    }
++    dw2 = qtest_readl(t->qts, t->rx_ring + i * 16 + 8);
++    g_assert_cmphex(dw2 & DESC_DD, ==, DESC_DD);
++    len = dw2 & 0xfff;
++    pdf = (dw2 >> 12) & 0xf;
++    g_assert_cmpuint(len, >=, 8);
++    qtest_memread(t->qts, t->rx_buf + i * BUF_SIZE, buf, len);
++    g_assert_cmphex(crc32c(buf, len - 4), ==,
++                    (uint32_t)ldl_be_p(buf + len - 4));
++    *n = len / 4 - 1;
++    for (unsigned k = 0; k < *n; k++) {
++        w[k] = (uint32_t)ldl_be_p(buf + 4 * k);
++    }
++    t->rx_next = (i + 1) % RING_N;
++    rx_post(t, 1);
++    return pdf;
++}
++
++/* Acknowledge a hot plug event (Spec 6.8, Table 6-12) */
++static void hp_ack(T *t, const uint32_t *w)
++{
++    uint32_t a[3] = {
++        w[0] & 0x7fffffffu, w[1],
++        7 | ((w[2] & 0x3f) << 8) | ((w[2] >> 31 ? 3u : 2u) << 30),
++    };
++
++    tx_frame(t, PDF_NOTIFY, a, 3);
++    t->hp++;
++    t->last_hp = w[2];
++}
++
++/* The next frame other than a hot plug event (acked), waited for */
++static unsigned rx_wait(T *t, uint32_t *w, unsigned *n, int tries)
++{
++    for (int i = 0; i < tries; i++) {
++        unsigned pdf = rx_recv(t, w, n);
++
++        if (pdf == PDF_HOTPLUG) {
++            hp_ack(t, w);
++            i--;
++            continue;
++        }
++        if (pdf) {
++            return pdf;
++        }
++        step(t, 1);
++    }
++    return 0;
++}
++
++/* Collect (acknowledge) pending hot plug events */
++static void settle(T *t)
++{
++    uint32_t w[64];
++    unsigned n;
++
++    for (int i = 0; i < 5; i++) {
++        step(t, 20);
++        while (rx_recv(t, w, &n)) {
++            g_assert_cmpuint(n >= 3 ? 1 : 0, ==, 1);
++            hp_ack(t, w);
++        }
++    }
++}
++
++static void ctl_send(T *t, unsigned pdf, uint64_t route, unsigned cs,
++                     unsigned adp, unsigned off, unsigned n,
++                     const uint32_t *in)
++{
++    uint32_t f[3 + 16];
++
++    f[0] = route >> 32;
++    f[1] = (uint32_t)route;
++    f[2] = off | (n << 13) | (adp << 19) | (cs << 25);
++    if (pdf == PDF_WRITE) {
++        memcpy(&f[3], in, 4 * n);
++    }
++    tx_frame(t, pdf, f, 3 + (pdf == PDF_WRITE ? n : 0));
++}
++
++static void ctl_read(T *t, uint64_t route, unsigned cs, unsigned adp,
++                     unsigned off, unsigned n, uint32_t *out)
++{
++    uint32_t w[64];
++    unsigned got;
++
++    ctl_send(t, PDF_READ, route, cs, adp, off, n, NULL);
++    g_assert_cmpuint(rx_wait(t, w, &got, 50), ==, PDF_READ);
++    g_assert_cmpuint(got, ==, 3 + n);
++    memcpy(out, &w[3], 4 * n);
++}
++
++static uint32_t rd1(T *t, uint64_t route, unsigned cs, unsigned adp,
++                    unsigned off)
++{
++    uint32_t v;
++
++    ctl_read(t, route, cs, adp, off, 1, &v);
++    return v;
++}
++
++static void ctl_write(T *t, uint64_t route, unsigned cs, unsigned adp,
++                      unsigned off, unsigned n, const uint32_t *in)
++{
++    uint32_t w[64];
++    unsigned got;
++
++    ctl_send(t, PDF_WRITE, route, cs, adp, off, n, in);
++    g_assert_cmpuint(rx_wait(t, w, &got, 50), ==, PDF_WRITE);
++}
++
++static void wr1(T *t, uint64_t route, unsigned cs, unsigned adp,
++                unsigned off, uint32_t v)
++{
++    ctl_write(t, route, cs, adp, off, 1, &v);
++}
++
++static void rmw(T *t, uint64_t route, unsigned cs, unsigned adp,
++                unsigned off, uint32_t clr, uint32_t set)
++{
++    wr1(t, route, cs, adp, off, (rd1(t, route, cs, adp, off) & ~clr) | set);
++}
++
++/* Capability @id in an adapter's chain (Spec 8.2.2) */
++static unsigned adp_cap(T *t, uint64_t route, unsigned adp, unsigned id)
++{
++    unsigned ptr = rd1(t, route, CS_ADAPTER, adp, 1) & 0xff;
++
++    for (int n = 0; ptr && n < 16; n++) {
++        uint32_t h = rd1(t, route, CS_ADAPTER, adp, ptr);
++
++        if (((h >> 8) & 0xff) == id) {
++            return ptr;
++        }
++        ptr = h & 0xff;
++    }
++    g_assert_not_reached();
++}
++
++/*
++ * One path entry (Spec Table 8-22): @adp's HopID @hop to @out HopID
++ * @ohop. Credits at a lane adapter's ingress only; USB3 weight 2, priority
++ * 3 (Guide Table 5-4); IFC at lane ingress, EFC and ESE elsewhere.
++ */
++static void path(T *t, uint64_t route, unsigned adp, unsigned hop,
++                 unsigned out, unsigned ohop, unsigned credits)
++{
++    uint32_t e[2] = {
++        ohop | (out << 11) | (credits << 17) | (1u << 31),
++        2 | (3 << 8) | (credits ? 1u << 24 : (1u << 25 | 1u << 27)),
++    };
++
++    ctl_write(t, route, CS_PATH, adp, 2 * hop, 2, e);
++}
++
++static void path_clear(T *t, uint64_t route, unsigned adp, unsigned hop)
++{
++    uint32_t e[2] = { 0, 0 };
++
++    ctl_write(t, route, CS_PATH, adp, 2 * hop, 2, e);
++}
++
++/* ------------------------------------------------------------------ */
++/* Software connection manager (Guide 3.2, 5.5)                         */
++/* ------------------------------------------------------------------ */
++
++/* Guide 3.2.1: the host router, Valid and CMUV 1.0 */
++static void cm_host(T *t)
++{
++    uint32_t v[4];
++
++    ctl_read(t, 0, CS_ROUTER, 0, 1, 4, v);
++    v[2] |= 1u << 31;
++    v[3] = (v[3] & ~0xff00u) | 0x1000;
++    ctl_write(t, 0, CS_ROUTER, 0, 1, 4, v);
++    settle(t);
++}
++
++/*
++ * The device router on host port 1 at route 1: Lock cleared on the host
++ * lane adapter, ROUTER_CS_1-4 (depth 1, route, Valid, CMUV), then PCIe
++ * and USB3 Tunneling On and Configuration Valid in a second write
++ * (Guide 3.2.3 "must set USB3 Tunneling"), Configuration Ready waited for.
++ */
++static void cm_device(T *t)
++{
++    uint32_t v[4];
++    int i;
++
++    rmw(t, 0, CS_ADAPTER, H_LANE, 4, 1u << 31, 0);
++    settle(t);
++    ctl_read(t, 1, CS_ROUTER, 0, 1, 4, v);
++    v[0] = (v[0] & ~(7u << 20)) | (1u << 20);
++    v[1] = 1;
++    v[2] = 1u << 31;
++    v[3] = (v[3] & ~0xff00u) | 0x1000;
++    ctl_write(t, 1, CS_ROUTER, 0, 1, 4, v);
++    rmw(t, 1, CS_ROUTER, 0, 5, 0, RT_PTO | RT_UTO);
++    rmw(t, 1, CS_ROUTER, 0, 5, 0, RT_CV);
++    for (i = 0; i < 40 && !(rd1(t, 1, CS_ROUTER, 0, 6) & RT_CR); i++) {
++        step(t, 10);
++    }
++    g_assert_cmpint(i, <, 40);
++}
++
++/*
++ * Bandwidth on the host's USB3 Down adapter (Spec Table 8-14; Linux
++ * usb4.c usb4_usb3_port_allocate_bandwidth, xHCI98 tbtU4Cmr/WriteBw):
++ * Connection Manager Request, Host Controller Ack, scale, allocated
++ * up/down, request cleared, ack cleared.
++ */
++static void cm_usb3_bandwidth(T *t, unsigned cd, unsigned units)
++{
++    rmw(t, 0, CS_ADAPTER, H_USB3, cd + 2, 0, USB3_CMR);
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd + 1) & USB3_HCA, ==,
++                    USB3_HCA);
++    /* consumed bandwidth reads 0: nothing behind it books any */
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd + 1) & 0xffffff, ==, 0);
++    wr1(t, 0, CS_ADAPTER, H_USB3, cd + 3, 0);
++    rmw(t, 0, CS_ADAPTER, H_USB3, cd + 2, 0xffffff, units | (units << 12));
++    rmw(t, 0, CS_ADAPTER, H_USB3, cd + 2, USB3_CMR, 0);
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd + 1) & USB3_HCA, ==, 0);
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd + 2) & 0xffffff, ==,
++                    units | (units << 12));
++}
++
++/*
++ * Guide 5.5.1 steps 2-5: paths both ways, then Path Enable with Valid on
++ * the host's USB3 Down adapter, then on the device's USB3 Up adapter.
++ * The tunnel is up only after the last write.
++ */
++static void cm_usb3_up(T *t)
++{
++    unsigned cd = adp_cap(t, 0, H_USB3, CAP_PROTO);
++    unsigned cu = adp_cap(t, 1, D_USB3, CAP_PROTO);
++
++    /* Max Supported Link Rate 20 Gb/s, no USB3 link yet */
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd + 4) & 0x7f0ff, ==,
++                    0x01000);
++    cm_usb3_bandwidth(t, cd, 275);
++    path(t, 0, H_USB3, 8, H_LANE, HOP_DOWN, 0);
++    path(t, 1, D_LANE, HOP_DOWN, D_USB3, 8, 16);
++    path(t, 1, D_USB3, 8, D_LANE, HOP_UP, 0);
++    path(t, 0, H_LANE, HOP_UP, H_USB3, 8, 16);
++    g_assert(usb3_has(t, "down "));
++    rmw(t, 0, CS_ADAPTER, H_USB3, cd, 0, USB3_PE | USB3_V);
++    g_assert(usb3_has(t, "down "));
++    rmw(t, 1, CS_ADAPTER, D_USB3, cu, 0, USB3_PE | USB3_V);
++    g_assert(usb3_has(t, "up reason=up"));
++    /* the USB3 link is in U0 with USB3 Link Valid on both adapters */
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd + 4) & 0xfff, ==,
++                    USB3_ULV);
++    g_assert_cmphex(rd1(t, 1, CS_ADAPTER, D_USB3, cu + 4) & 0xfff, ==,
++                    USB3_ULV);
++}
++
++/*
++ * Guide 5.5.2: Path Enable cleared (Valid kept, as xHCI98's tbtU4Disable)
++ * on the Down adapter first, which takes the tunnel down at once; then
++ * the Up adapter, the paths, and the bandwidth released.
++ */
++static void cm_usb3_down(T *t)
++{
++    unsigned cd = adp_cap(t, 0, H_USB3, CAP_PROTO);
++    unsigned cu = adp_cap(t, 1, D_USB3, CAP_PROTO);
++
++    rmw(t, 0, CS_ADAPTER, H_USB3, cd, USB3_PE, 0);
++    g_assert(usb3_has(t, "down reason=admin-down"));
++    g_assert(usb3_has(t, "attached=stor0:0"));
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd + 4) & USB3_ULV, ==, 0);
++    rmw(t, 1, CS_ADAPTER, D_USB3, cu, USB3_PE, 0);
++    path_clear(t, 0, H_USB3, 8);
++    path_clear(t, 1, D_LANE, HOP_DOWN);
++    path_clear(t, 1, D_USB3, 8);
++    path_clear(t, 0, H_LANE, HOP_UP);
++    cm_usb3_bandwidth(t, cd, 0);
++}
++
++/* ------------------------------------------------------------------ */
++/* A small xHCI driver (xHCI 1.2 sections 4.2-4.6)                      */
++/* ------------------------------------------------------------------ */
++
++#define XR_TRBS         256
++#define TRB_C           (1u << 0)
++#define TRB_ISP         (1u << 2)
++#define TRB_IOC         (1u << 5)
++#define TRB_IDT         (1u << 6)
++#define TRB_TYPE(t)     ((t) << 10)
++#define TRB_GET_TYPE(c) (((c) >> 10) & 0x3f)
++#define TRB_GET_CC(s)   ((s) >> 24)
++#define TRB_GET_SLOT(c) ((c) >> 24)
++#define TR_NORMAL       1
++#define TR_SETUP        2
++#define TR_DATA         3
++#define TR_STATUS       4
++#define CR_ENABLE_SLOT  9
++#define CR_DISABLE_SLOT 10
++#define CR_ADDRESS_DEV  11
++#define CR_CONFIG_EP    12
++#define ER_TRANSFER     32
++#define ER_CMD_DONE     33
++#define ER_PORT_STATUS  34
++#define CC_SUCCESS      1
++#define CC_SHORT        13
++#define PORTSC(n)       (0x400 + 0x10 * (n))
++#define PORTSC_CCS      (1u << 0)
++#define PORTSC_PR       (1u << 4)
++#define PORTSC_PP       (1u << 9)
++#define PORTSC_SPEED(v) (((v) >> 10) & 0xf)
++#define PORTSC_CSC      (1u << 17)
++#define DCI_EP0         1
++#define DCI_IN          3       /* usb-storage: EP 1 IN, bulk */
++#define DCI_OUT         4       /* EP 2 OUT, bulk */
++
++typedef struct XRing {
++    uint64_t base;
++    unsigned idx;
++} XRing;
++
++typedef struct X {
++    T *t;
++    uint64_t bar;
++    uint32_t oper, rt, db;
++    unsigned nports;
++    uint64_t dcbaa, ictx, buf;
++    XRing cmd, ev, ep0, in, out;
++    unsigned slot, port;
++    uint32_t tag;
++} X;
++
++static uint32_t xr(X *x, uint32_t off)
++{
++    return qtest_readl(x->t->qts, x->bar + off);
++}
++
++static void xw(X *x, uint32_t off, uint32_t v)
++{
++    qtest_writel(x->t->qts, x->bar + off, v);
++}
++
++static void xwq(X *x, uint32_t off, uint64_t v)
++{
++    xw(x, off, (uint32_t)v);
++    xw(x, off + 4, v >> 32);
++}
++
++static uint64_t xpage(X *x)
++{
++    uint64_t a = guest_alloc(&x->t->alloc, 0x1000);
++
++    qtest_memset(x->t->qts, a, 0, 0x1000);
++    return a;
++}
++
++static void xring_new(X *x, XRing *r)
++{
++    r->base = xpage(x);
++    r->idx = 0;
++}
++
++static void xtrb(X *x, XRing *r, uint64_t param, uint32_t status,
++                 uint32_t control)
++{
++    uint64_t a = r->base + 16 * r->idx++;
++
++    g_assert_cmpuint(r->idx, <, XR_TRBS);
++    qtest_writeq(x->t->qts, a, param);
++    qtest_writel(x->t->qts, a + 8, status);
++    qtest_writel(x->t->qts, a + 12, control | TRB_C);
++}
++
++/* The next event of @type, others (port status changes) skipped */
++static bool xevent(X *x, unsigned type, uint32_t *status, uint32_t *control)
++{
++    for (int i = 0; i < 4000; i++) {
++        uint64_t a = x->ev.base + 16 * x->ev.idx;
++        uint32_t c = qtest_readl(x->t->qts, a + 12);
++
++        if (!(c & TRB_C)) {
++            qtest_clock_step(x->t->qts, 100 * 1000);
++            if (i > 100) {
++                g_usleep(500);      /* block I/O completes in real time */
++            }
++            continue;
++        }
++        x->ev.idx++;
++        g_assert_cmpuint(x->ev.idx, <, XR_TRBS);
++        xwq(x, x->rt + 0x38, (a + 16) | (1u << 3));     /* ERDP, EHB */
++        if (TRB_GET_TYPE(c) == type) {
++            if (status) {
++                *status = qtest_readl(x->t->qts, a + 8);
++            }
++            if (control) {
++                *control = c;
++            }
++            return true;
++        }
++        g_assert_cmpuint(TRB_GET_TYPE(c), ==, ER_PORT_STATUS);
++    }
++    return false;
++}
++
++/* Port status change events pending now (consumed) */
++static unsigned xdrain(X *x)
++{
++    unsigned n = 0;
++
++    for (;;) {
++        uint64_t a = x->ev.base + 16 * x->ev.idx;
++        uint32_t c = qtest_readl(x->t->qts, a + 12);
++
++        if (!(c & TRB_C)) {
++            return n;
++        }
++        g_assert_cmpuint(TRB_GET_TYPE(c), ==, ER_PORT_STATUS);
++        x->ev.idx++;
++        g_assert_cmpuint(x->ev.idx, <, XR_TRBS);
++        xwq(x, x->rt + 0x38, (a + 16) | (1u << 3));
++        n++;
++    }
++}
++
++static unsigned xcmd(X *x, uint64_t param, uint32_t control)
++{
++    uint32_t status;
++
++    xtrb(x, &x->cmd, param, 0, control);
++    xw(x, x->db, 0);
++    g_assert(xevent(x, ER_CMD_DONE, &status, &control));
++    g_assert_cmpuint(TRB_GET_CC(status), ==, CC_SUCCESS);
++    return TRB_GET_SLOT(control);
++}
++
++/* Map the xHCI at @bar (config at @bus/@devfn) and run it */
++static void xhci_start(X *x, T *t, int bus, int devfn, uint64_t bar)
++{
++    uint64_t erst;
++
++    memset(x, 0, sizeof(*x));
++    x->t = t;
++    x->bar = bar;
++    cfg_writel(t, bus, devfn, 0x10, (uint32_t)bar);
++    cfg_writel(t, bus, devfn, 0x14, bar >> 32);
++    cfg_writel(t, bus, devfn, 0x04, 0x6);
++    x->oper = qtest_readb(t->qts, bar) & 0xff;
++    x->rt = xr(x, 0x18) & ~0x1fu;
++    x->db = xr(x, 0x14) & ~0x3u;
++    x->nports = xr(x, 0x04) >> 24;
++    xw(x, x->oper + 0x00, 1u << 1);                 /* HCRST */
++    g_assert_false(xr(x, x->oper) & (1u << 1));
++    x->dcbaa = xpage(x);
++    x->ictx = xpage(x);
++    x->buf = xpage(x);
++    erst = xpage(x);
++    xring_new(x, &x->cmd);
++    xring_new(x, &x->ev);
++    xw(x, x->oper + 0x38, 8);                       /* CONFIG: 8 slots */
++    xwq(x, x->oper + 0x30, x->dcbaa);
++    qtest_writeq(t->qts, erst, x->ev.base);
++    qtest_writel(t->qts, erst + 8, XR_TRBS);
++    xw(x, x->rt + 0x28, 1);                         /* ERSTSZ */
++    xwq(x, x->rt + 0x30, erst);
++    xwq(x, x->rt + 0x38, x->ev.base | (1u << 3));
++    xwq(x, x->oper + 0x18, x->cmd.base | 1);        /* CRCR, RCS */
++    xw(x, x->oper + 0x00, 1);                       /* RS */
++    g_assert_false(xr(x, x->oper + 0x04) & 1);      /* HCHalted clear */
++}
++
++/* Root hub ports with a device connected, as a bit mask */
++static uint32_t xhci_connected(X *x)
++{
++    uint32_t m = 0;
++
++    for (unsigned p = 0; p < x->nports; p++) {
++        if (xr(x, x->oper + PORTSC(p)) & PORTSC_CCS) {
++            m |= 1u << p;
++        }
++    }
++    return m;
++}
++
++/*
++ * Reset the connected port @p, enable a slot, address the device, read
++ * its device descriptor (control transfer on EP 0): @vid / @pid.
++ */
++static void xhci_address(X *x, unsigned p, uint16_t vid, uint16_t pid)
++{
++    uint8_t d[18];
++    uint32_t status;
++
++    x->port = p;
++    xw(x, x->oper + PORTSC(p), PORTSC_PP | PORTSC_PR);
++    xdrain(x);
++    x->slot = xcmd(x, 0, TRB_TYPE(CR_ENABLE_SLOT));
++    g_assert_cmpuint(x->slot, >=, 1);
++    qtest_writeq(x->t->qts, x->dcbaa + 8 * x->slot, xpage(x));
++    xring_new(x, &x->ep0);
++    qtest_memset(x->t->qts, x->ictx, 0, 0x1000);
++    qtest_writel(x->t->qts, x->ictx + 0x04, 0x3);       /* add slot, EP0 */
++    qtest_writel(x->t->qts, x->ictx + 0x20, 1u << 27);  /* 1 context */
++    qtest_writel(x->t->qts, x->ictx + 0x24, (p + 1) << 16);
++    qtest_writel(x->t->qts, x->ictx + 0x44,
++                 (512 << 16) | (4 << 3) | (3 << 1));    /* control, CErr */
++    qtest_writeq(x->t->qts, x->ictx + 0x48, x->ep0.base | 1);
++    xcmd(x, x->ictx, TRB_TYPE(CR_ADDRESS_DEV) | (x->slot << 24));
++
++    /* GET_DESCRIPTOR(DEVICE), 18 bytes: setup, data IN, status OUT */
++    qtest_memset(x->t->qts, x->buf, 0, 64);
++    xtrb(x, &x->ep0, 0x80 | (6 << 8) | (0x0100 << 16) | (18ull << 48), 8,
++         TRB_TYPE(TR_SETUP) | TRB_IDT | (3 << 16));
++    xtrb(x, &x->ep0, x->buf, 18, TRB_TYPE(TR_DATA) | (1 << 16));
++    xtrb(x, &x->ep0, 0, 0, TRB_TYPE(TR_STATUS) | TRB_IOC);
++    xw(x, x->db + 4 * x->slot, DCI_EP0);
++    g_assert(xevent(x, ER_TRANSFER, &status, NULL));
++    g_assert_cmpuint(TRB_GET_CC(status), ==, CC_SUCCESS);
++    qtest_memread(x->t->qts, x->buf, d, sizeof(d));
++    g_assert_cmpuint(d[1], ==, 1);                      /* DEVICE */
++    g_assert_cmphex(lduw_le_p(d + 8), ==, vid);
++    g_assert_cmphex(lduw_le_p(d + 10), ==, pid);
++}
++
++static void xhci_disable_slot(X *x)
++{
++    if (x->slot) {
++        xcmd(x, 0, TRB_TYPE(CR_DISABLE_SLOT) | (x->slot << 24));
++        x->slot = 0;
++    }
++}
++
++/* One bulk TD of @len bytes at @addr; bytes transferred */
++static unsigned xhci_bulk(X *x, bool in, uint64_t addr, unsigned len)
++{
++    uint32_t status;
++
++    xtrb(x, in ? &x->in : &x->out, addr, len,
++         TRB_TYPE(TR_NORMAL) | TRB_IOC | TRB_ISP);
++    xw(x, x->db + 4 * x->slot, in ? DCI_IN : DCI_OUT);
++    g_assert(xevent(x, ER_TRANSFER, &status, NULL));
++    g_assert(TRB_GET_CC(status) == CC_SUCCESS ||
++             TRB_GET_CC(status) == CC_SHORT);
++    return len - (status & 0xffffff);
++}
++
++/* Configure the bulk endpoints and SET_CONFIGURATION(1) (xHCI 4.6.6) */
++static void msd_configure(X *x)
++{
++    QTestState *qts = x->t->qts;
++    uint32_t status;
++
++    xring_new(x, &x->in);
++    xring_new(x, &x->out);
++    qtest_memset(qts, x->ictx, 0, 0x1000);
++    qtest_writel(qts, x->ictx + 0x04, 1 | (1u << DCI_IN) | (1u << DCI_OUT));
++    qtest_writel(qts, x->ictx + 0x20, (uint32_t)DCI_OUT << 27);
++    qtest_writel(qts, x->ictx + 0x24, (x->port + 1) << 16);
++    qtest_writel(qts, x->ictx + 0x20 * (DCI_IN + 1) + 4,
++                 (1024 << 16) | (6 << 3) | (3 << 1));   /* bulk IN */
++    qtest_writeq(qts, x->ictx + 0x20 * (DCI_IN + 1) + 8, x->in.base | 1);
++    qtest_writel(qts, x->ictx + 0x20 * (DCI_IN + 1) + 16, 1024);
++    qtest_writel(qts, x->ictx + 0x20 * (DCI_OUT + 1) + 4,
++                 (1024 << 16) | (2 << 3) | (3 << 1));   /* bulk OUT */
++    qtest_writeq(qts, x->ictx + 0x20 * (DCI_OUT + 1) + 8, x->out.base | 1);
++    qtest_writel(qts, x->ictx + 0x20 * (DCI_OUT + 1) + 16, 1024);
++    xcmd(x, x->ictx, TRB_TYPE(CR_CONFIG_EP) | (x->slot << 24));
++    xtrb(x, &x->ep0, (9 << 8) | (1 << 16), 8,
++         TRB_TYPE(TR_SETUP) | TRB_IDT);
++    xtrb(x, &x->ep0, 0, 0, TRB_TYPE(TR_STATUS) | TRB_IOC | (1 << 16));
++    xw(x, x->db + 4 * x->slot, DCI_EP0);
++    g_assert(xevent(x, ER_TRANSFER, &status, NULL));
++    g_assert_cmpuint(TRB_GET_CC(status), ==, CC_SUCCESS);
++}
++
++/*
++ * One bulk-only transport command (USB MSC BOT 1.0, 5.1-5.2): CBW out,
++ * @dlen bytes in (if any), CSW in. Returns bCSWStatus.
++ */
++static unsigned msd_cmd(X *x, const uint8_t *cdb, unsigned cdblen,
++                        unsigned dlen, uint64_t data)
++{
++    uint8_t cbw[31] = { 0 }, csw[13];
++    uint64_t b = x->buf + 512;
++
++    stl_le_p(cbw, 0x43425355);
++    stl_le_p(cbw + 4, ++x->tag);
++    stl_le_p(cbw + 8, dlen);
++    cbw[12] = dlen ? 0x80 : 0;
++    cbw[14] = cdblen;
++    memcpy(cbw + 15, cdb, cdblen);
++    qtest_memwrite(x->t->qts, b, cbw, sizeof(cbw));
++    g_assert_cmpuint(xhci_bulk(x, false, b, sizeof(cbw)), ==, sizeof(cbw));
++    if (dlen) {
++        g_assert_cmpuint(xhci_bulk(x, true, data, dlen), ==, dlen);
++    }
++    g_assert_cmpuint(xhci_bulk(x, true, b, sizeof(csw)), ==, sizeof(csw));
++    qtest_memread(x->t->qts, b, csw, sizeof(csw));
++    g_assert_cmphex(ldl_le_p(csw), ==, 0x53425355);
++    g_assert_cmphex(ldl_le_p(csw + 4), ==, x->tag);
++    return csw[12];
++}
++
++/* TEST UNIT READY until the power-on unit attention is gone, READ(10) */
++static void msd_read_check(X *x, unsigned lba)
++{
++    static const uint8_t tur[6] = { 0 };
++    uint8_t rd10[10] = { 0x28, 0, 0, 0, 0, lba, 0, 0, 1, 0 };
++    uint64_t data = x->buf + 1024;
++    uint8_t sec[512];
++    int i;
++
++    for (i = 0; i < 4 && msd_cmd(x, tur, sizeof(tur), 0, 0); i++) {
++    }
++    g_assert_cmpint(i, <, 4);
++    g_assert_cmpuint(msd_cmd(x, rd10, sizeof(rd10), 512, data), ==, 0);
++    qtest_memread(x->t->qts, data, sec, sizeof(sec));
++    for (unsigned k = 0; k < 512; k++) {
++        g_assert_cmpuint(sec[k], ==, (lba * 37 + k) & 0xff);
++    }
++}
++
++/*
++ * The usb-storage (46f4:0001) behind the tunnel, end to end: connected
++ * on a SuperSpeed root port, addressed, descriptor read, sector @lba
++ * read and checked.
++ */
++static void storage_io(X *x, unsigned lba)
++{
++    uint32_t m = xhci_connected(x);
++    unsigned p;
++
++    g_assert_cmphex(m, !=, 0);
++    p = ctz32(m);
++    g_assert_cmphex(m, ==, 1u << p);                /* only that one */
++    g_assert_cmpuint(PORTSC_SPEED(xr(x, x->oper + PORTSC(p))), ==, 4);
++    xhci_address(x, p, 0x46f4, 0x0001);
++    msd_configure(x);
++    msd_read_check(x, lba);
++}
++
++/* ------------------------------------------------------------------ */
++/* Software CM legs (usb4-generic, i440FX)                              */
++/* ------------------------------------------------------------------ */
++
++/*
++ * i440FX: qemu-xhci at 00:05.0 with usb-storage stor0 on QEMU USB port 1
++ * (SuperSpeed root port p2 + 1), the host at 00:04.0 mapping USB4 port 1
++ * to it (_DSD), the device router enc0 on port 1 naming stor0.
++ */
++static T *t_start(const char *host_opts, const char *dev_opts,
++                  const char *extra)
++{
++    T *t = g_new0(T, 1);
++
++    t->img = make_img();
++    t->qts = qtest_initf("-machine pc -nodefaults "
++                         "-drive if=none,id=ud,file=%s,format=raw "
++                         "-device qemu-xhci,id=xhci,bus=pci.0,addr=0x5 "
++                         "-device usb-storage,id=stor0,bus=xhci.0,port=1,"
++                         "drive=ud %s "
++                         "-device usb4-host,id=u4,bus=pci.0,addr=0x4,"
++                         "msi=off,msix=off,usb3-xhci=xhci,usb3-port1=1%s "
++                         "-device usb4-device,id=enc0,bus=u4.0,port=1,"
++                         "usb3-dev=stor0%s",
++                         t->img, extra ? extra : "",
++                         host_opts ? host_opts : "",
++                         dev_opts ? dev_opts : "");
++    pc_alloc_init(&t->alloc, t->qts, ALLOC_NO_FLAGS);
++    return t;
++}
++
++/*
++ * Setup, data, teardown, setup again: the usb-storage is absent from the
++ * xHCI until the CM's last Path Enable write, readable through it while
++ * the tunnel is up, gone at the first teardown write, and back after the
++ * CM builds the tunnel again.
++ */
++static void test_setup_data_teardown(void)
++{
++    T *t = t_start(NULL, NULL, NULL);
++    X x;
++
++    g_assert(usb3_has(t, "down reason=up ups=0 downs=0 attached=stor0:0"));
++    xhci_start(&x, t, 0, XHCI_DEVFN, XHCI_BAR);
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    rings_setup(t, 0, NHI_DEVFN);
++    cm_host(t);
++    cm_device(t);
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    cm_usb3_up(t);
++    step(t, 1);                                     /* the attach BH */
++    g_assert(usb3_has(t, "up reason=up ups=1 downs=0 attached=stor0:1"));
++    storage_io(&x, 0);
++
++    cm_usb3_down(t);
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    g_assert_cmpuint(xdrain(&x), >=, 1);            /* port status change */
++    g_assert(usb3_has(t, "down reason=admin-down ups=1 downs=1"));
++    step(t, 10);
++    g_assert(usb3_has(t, "attached=stor0:0"));      /* the BH agrees */
++    xhci_disable_slot(&x);
++
++    cm_usb3_up(t);
++    step(t, 1);
++    g_assert(usb3_has(t, "up reason=up ups=2 downs=1 attached=stor0:1"));
++    storage_io(&x, 1);
++    t_stop(t);
++}
++
++/*
++ * Surprise removal of the device router with the tunnel up and the disk
++ * addressed: device_del, then x-cable. The USB device leaves the xHCI in
++ * the same call; a re-added (or re-plugged) router starts with the
++ * tunnel down, so the disk comes back only once the CM builds it again.
++ */
++static void test_surprise_unplug(void)
++{
++    T *t = t_start(NULL, NULL, NULL);
++    X x;
++
++    xhci_start(&x, t, 0, XHCI_DEVFN, XHCI_BAR);
++    rings_setup(t, 0, NHI_DEVFN);
++    cm_host(t);
++    cm_device(t);
++    cm_usb3_up(t);
++    step(t, 1);
++    storage_io(&x, 0);
++
++    /* device_del: hot unplug event of host lane adapter 1, disk gone */
++    qtest_qmp_assert_success(t->qts, "{'execute': 'device_del', "
++                             "'arguments': {'id': 'enc0'}}");
++    g_assert_false(usb_attached(t, "stor0"));
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    settle(t);
++    g_assert_cmphex(t->last_hp >> 31, ==, 1);       /* unplugged */
++    xhci_disable_slot(&x);
++    xdrain(&x);
++
++    /* device_add of the same router: tunnel down, the disk stays away */
++    qtest_qmp_assert_success(t->qts, "{'execute': 'device_add', "
++                             "'arguments': {'driver': 'usb4-device', "
++                             "'id': 'enc0', 'bus': 'u4.0', 'port': 1, "
++                             "'usb3-dev': 'stor0'}}");
++    settle(t);
++    g_assert_cmphex(t->last_hp >> 31, ==, 0);       /* plugged */
++    step(t, 10);
++    g_assert(usb3_has(t, "down reason=up ups=0 downs=0 attached=stor0:0"));
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    cm_device(t);
++    cm_usb3_up(t);
++    step(t, 1);
++    storage_io(&x, 2);
++
++    /* x-cable: the same as a surprise, the object stays */
++    qom_set_bool(t, ENC0, "x-cable", false);
++    g_assert(usb3_has(t, "down reason=surprise ups=1 downs=1 "
++                      "attached=stor0:0"));
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    settle(t);
++    xhci_disable_slot(&x);
++    xdrain(&x);
++    qom_set_bool(t, ENC0, "x-cable", true);
++    settle(t);
++    step(t, 10);
++    g_assert(usb3_has(t, "down reason=surprise ups=1 downs=1 "
++                      "attached=stor0:0"));
++    cm_device(t);
++    cm_usb3_up(t);
++    step(t, 1);
++    g_assert(usb3_has(t, "up reason=up ups=2 downs=1 attached=stor0:1"));
++    storage_io(&x, 3);
++    t_stop(t);
++}
++
++/*
++ * A fault rule combined with the tunnel (docs/FAULTS.md): the reply to
++ * the CM's last Path Enable write is dropped and the cable pulled behind
++ * it. The write took effect (the tunnel came up) but the router is gone
++ * before the CM hears back: the disk is not on the xHCI, the CM sees the
++ * hot unplug instead of its reply. Then a host router reset fired by a
++ * rule with the tunnel up takes it down too; the CM restarts and
++ * rebuilds it.
++ */
++static void test_fault_rule(void)
++{
++    T *t = t_start(NULL, NULL, NULL);
++    unsigned cd, cu, n;
++    uint32_t w[64], v;
++    X x;
++
++    xhci_start(&x, t, 0, XHCI_DEVFN, XHCI_BAR);
++    rings_setup(t, 0, NHI_DEVFN);
++    cm_host(t);
++    cm_device(t);
++    cd = adp_cap(t, 0, H_USB3, CAP_PROTO);
++    cu = adp_cap(t, 1, D_USB3, CAP_PROTO);
++    cm_usb3_bandwidth(t, cd, 275);
++    path(t, 0, H_USB3, 8, H_LANE, HOP_DOWN, 0);
++    path(t, 1, D_LANE, HOP_DOWN, D_USB3, 8, 16);
++    path(t, 1, D_USB3, 8, D_LANE, HOP_UP, 0);
++    path(t, 0, H_LANE, HOP_UP, H_USB3, 8, 16);
++    rmw(t, 0, CS_ADAPTER, H_USB3, cd, 0, USB3_PE | USB3_V);
++
++    qom_set_str(t, U4, "x-reply-faults",
++                "pdf=write route=1 act=drop+unplug dev=enc0");
++    v = rd1(t, 1, CS_ADAPTER, D_USB3, cu) | USB3_PE | USB3_V;
++    ctl_send(t, PDF_WRITE, 1, CS_ADAPTER, D_USB3, cu, 1, &v);
++    g_assert_cmpuint(rx_wait(t, w, &n, 20), ==, 0);     /* no reply */
++    g_assert_cmphex(t->last_hp >> 31, ==, 1);       /* unplugged */
++    g_assert_false(qom_get_bool(t, ENC0, "x-attached"));
++    g_assert(usb3_has(t, "down reason=surprise ups=1 downs=1 "
++                      "attached=stor0:0"));
++    step(t, 10);
++    g_assert_false(usb_attached(t, "stor0"));
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    xdrain(&x);
++
++    /* back in: the CM finds a fresh router and builds the tunnel */
++    qom_set_str(t, U4, "x-reply-faults", "");
++    qom_set_bool(t, ENC0, "x-cable", true);
++    settle(t);
++    cm_device(t);
++    cm_usb3_up(t);
++    step(t, 1);
++    storage_io(&x, 1);
++
++    /* a host router reset behind the CM's back, fired by a rule */
++    qom_set_str(t, U4, "x-reply-faults", "pdf=read route=0 act=host-reset");
++    ctl_send(t, PDF_READ, 0, CS_ROUTER, 0, 0, 1, NULL);
++    step(t, 10);
++    g_assert(usb3_has(t, "down "));
++    g_assert(usb3_has(t, "attached=stor0:0"));
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    xhci_disable_slot(&x);
++    xdrain(&x);
++    qom_set_str(t, U4, "x-reply-faults", "");
++    rings_setup(t, 0, NHI_DEVFN);       /* the rings read disabled now */
++    cm_host(t);
++    cm_device(t);
++    cm_usb3_up(t);
++    step(t, 1);
++    g_assert(usb3_has(t, "up reason=up ups=3 downs=2 attached=stor0:1"));
++    storage_io(&x, 2);
++    t_stop(t);
++}
++
++/*
++ * The enclosure's hub: usb3-dev names a usb-hub, so everything plugged
++ * into it (a usb-mouse) follows the tunnel too, behind the disk on the
++ * other port. With the tunnel down none of them is attached.
++ */
++static void test_hub(void)
++{
++    T *t = t_start(NULL, ":hub0",
++                   "-device usb-hub,id=hub0,bus=xhci.0,port=2 "
++                   "-device usb-mouse,id=m0,bus=xhci.0,port=2.1");
++    X x;
++
++    step(t, 1);
++    g_assert_false(usb_attached(t, "stor0"));
++    g_assert_false(usb_attached(t, "hub0"));
++    g_assert_false(usb_attached(t, "m0"));
++    xhci_start(&x, t, 0, XHCI_DEVFN, XHCI_BAR);
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    rings_setup(t, 0, NHI_DEVFN);
++    cm_host(t);
++    cm_device(t);
++    cm_usb3_up(t);
++    step(t, 1);
++    g_assert(usb3_has(t, "attached=stor0:1 hub0:1"));
++    g_assert_true(usb_attached(t, "m0"));
++    g_assert_cmpuint(ctpop32(xhci_connected(&x)), ==, 2);   /* SS + USB2 */
++    cm_usb3_down(t);
++    g_assert(usb3_has(t, "attached=stor0:0 hub0:0"));
++    g_assert_false(usb_attached(t, "m0"));
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    t_stop(t);
++}
++
++/* System reset: every tunnel down, the disk gone until the CM rebuilds */
++static void test_system_reset(void)
++{
++    T *t = t_start(NULL, NULL, NULL);
++    X x;
++
++    rings_setup(t, 0, NHI_DEVFN);
++    cm_host(t);
++    cm_device(t);
++    cm_usb3_up(t);
++    step(t, 1);
++    g_assert_true(usb_attached(t, "stor0"));
++    qtest_qmp_assert_success(t->qts, "{'execute': 'system_reset'}");
++    qtest_qmp_eventwait(t->qts, "RESET");
++    step(t, 10);
++    g_assert(usb3_has(t, "down "));
++    g_assert_false(usb_attached(t, "stor0"));
++    xhci_start(&x, t, 0, XHCI_DEVFN, XHCI_BAR);
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    rings_setup(t, 0, NHI_DEVFN);
++    cm_host(t);
++    cm_device(t);
++    cm_usb3_up(t);
++    step(t, 1);
++    storage_io(&x, 3);
++    t_stop(t);
++}
++
++/*
++ * preos-cm=on with preos-usb3=on: the platform firmware's CM has built the
++ * USB3 tunnel before the OS (the disk is on the xHCI with no guest CM),
++ * and the OS CM finds it in config space: USB3 Tunneling On, Path Enable
++ * with Valid on both adapters, HopID 8 paths, the allocated bandwidth.
++ * Taking it down works as for its own tunnel. Without preos-usb3 the
++ * firmware builds no USB3 tunnel (the default is unchanged).
++ */
++static void test_preos(void)
++{
++    T *t = t_start(",preos-cm=on,preos-usb3=on", NULL, NULL);
++    uint32_t e[2];
++    unsigned cd;
++    X x;
++
++    step(t, 10);
++    g_assert(usb3_has(t, "up reason=up ups=1 downs=0 attached=stor0:1"));
++    xhci_start(&x, t, 0, XHCI_DEVFN, XHCI_BAR);
++    rings_setup(t, 0, NHI_DEVFN);
++    g_assert_cmphex(rd1(t, 1, CS_ROUTER, 0, 5) & (RT_CV | RT_UTO | RT_PTO),
++                    ==, RT_CV | RT_UTO | RT_PTO);
++    cd = adp_cap(t, 0, H_USB3, CAP_PROTO);
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd) & (USB3_PE | USB3_V),
++                    ==, USB3_PE | USB3_V);
++    g_assert_cmphex(rd1(t, 0, CS_ADAPTER, H_USB3, cd + 2) & 0xffffff, ==,
++                    275 | (275 << 12));
++    ctl_read(t, 0, CS_PATH, H_USB3, 16, 2, e);
++    g_assert_cmphex(e[0] & 0x8001ffffu, ==, 0x80000000u | (H_LANE << 11) | 10);
++    g_assert_cmphex(e[1] & 0xf, ==, 2);                 /* weight 2 */
++    storage_io(&x, 0);
++    /* the OS CM tears the firmware's tunnel down */
++    rmw(t, 0, CS_ADAPTER, H_USB3, cd, USB3_PE, 0);
++    g_assert(usb3_has(t, "down reason=admin-down ups=1 downs=1 "
++                      "attached=stor0:0"));
++    g_assert_cmphex(xhci_connected(&x), ==, 0);
++    t_stop(t);
++
++    t = t_start(",preos-cm=on", NULL, NULL);
++    step(t, 10);
++    g_assert(usb3_has(t, "down reason=up ups=0 downs=0 attached=stor0:0"));
++    t_stop(t);
++}
++
++static void expect_error(QDict *rsp, const char *what)
++{
++    QDict *err = qdict_get_qdict(rsp, "error");
++
++    g_assert(err);
++    if (!strstr(qdict_get_str(err, "desc"), what)) {
++        g_test_message("error: %s (wanted %s)", qdict_get_str(err, "desc"),
++                       what);
++        g_assert_not_reached();
++    }
++    qobject_unref(rsp);
++}
++
++/*
++ * usb3-dev is refused where no USB3 tunnel can exist: a Thunderbolt 3
++ * device router, the ASM2464 (adapter 4 unused in its DROM), behind a
++ * TB3 parent in a daisy chain, and on the firmware-CM hosts, whose host
++ * routers are Thunderbolt 3 ones.
++ */
++static void test_refused(void)
++{
++    QTestState *qts = qtest_init("-machine pc -nodefaults "
++                                 "-device usb4-host,id=u4,addr=04.0");
++
++    expect_error(qtest_qmp(qts, "{'execute': 'device_add', 'arguments': "
++                           "{'driver': 'usb4-device', 'bus': 'u4.0', "
++                           "'dialect': 'tb3', 'usb3-dev': 'x'}}"),
++                 "usb3-dev needs a dialect=usb4");
++    expect_error(qtest_qmp(qts, "{'execute': 'device_add', 'arguments': "
++                           "{'driver': 'usb4-device', 'bus': 'u4.0', "
++                           "'device-model': 'asm2464', 'usb3-dev': 'x'}}"),
++                 "other than device-model=asm2464");
++    qtest_qmp_assert_success(qts, "{'execute': 'device_add', 'arguments': "
++                             "{'driver': 'usb4-device', 'bus': 'u4.0', "
++                             "'id': 'dock', 'dialect': 'tb3', "
++                             "'downstream-ports': 1}}");
++    expect_error(qtest_qmp(qts, "{'execute': 'device_add', 'arguments': "
++                           "{'driver': 'usb4-device', 'bus': 'u4.0', "
++                           "'parent': 'dock', 'usb3-dev': 'x'}}"),
++                 "a dialect=tb3 router with no USB3 Downstream");
++    qtest_quit(qts);
++
++    qts = qtest_init("-machine pc -nodefaults "
++                     "-device usb4-host,id=tb,addr=04.0,"
++                     "profile=tb3-alpine-ridge");
++    expect_error(qtest_qmp(qts, "{'execute': 'device_add', 'arguments': "
++                           "{'driver': 'usb4-device', 'bus': 'tb.0', "
++                           "'usb3-dev': 'x'}}"),
++                 "usb3-dev needs a profile=usb4-generic host");
++    qtest_quit(qts);
++}
++
++/* ------------------------------------------------------------------ */
++/* Thunderbolt 3 under the firmware CM: the dock's xHCI in PCIe tunnel  */
++/* ------------------------------------------------------------------ */
++
++#define TP_DEVFN        (3 << 3)
++#define TP0             "/machine/peripheral/tp0"
++#define DOCK_WIN        0xe8000000u
++#define DOCK_WIN_REG    0xe800e800u     /* memory base = limit = 0xe80 */
++
++/* The generation of the dock's tree inserted at tp0 (waited for), or 0 */
++static unsigned dock_gen(T *t, int tries)
++{
++    for (int i = 0; i < tries; i++) {
++        for (unsigned g = 1; g < 8; g++) {
++            g_autofree char *id = g_strdup_printf("tp0-dock%u-usb", g);
++
++            if (peripheral_exists(t, id)) {
++                return g;
++            }
++        }
++        step(t, 100);
++    }
++    return 0;
++}
++
++static bool gate_open(T *t)
++{
++    g_autofree char *st = qom_get_str(t, TP0, "endpoint");
++
++    return strstr(st, "gate=open") != NULL;
++}
++
++static uint32_t mailbox(T *t, uint8_t cmd)
++{
++    nhi_wr(t, INMAIL_DATA, 0);
++    nhi_wr(t, INMAIL_CMD, (1u << 31) | cmd);
++    return nhi_rd(t, INMAIL_CMD);
++}
++
++/*
++ * The dock's tree behind the tunnel port (usb4-tunnel-slot.c
++ * ts_build_switch): switch upstream port on bus 1, its downstream ports
++ * on bus 2 (nvme, nic, xhci), the dock's qemu-xhci on bus 5. Bus numbers,
++ * one memory window down to the xHCI, slot power on the root port.
++ */
++static void dock_map(T *t)
++{
++    int exp;
++
++    cfg_writel(t, 0, TP_DEVFN, 0x18, 0x00050100);
++    cfg_writel(t, 0, TP_DEVFN, 0x20, DOCK_WIN_REG);
++    cfg_writel(t, 0, TP_DEVFN, 0x04, 0x0006);
++    exp = cfg_readl(t, 0, TP_DEVFN, 0x34) & 0xfc;
++    while (exp && (cfg_readl(t, 0, TP_DEVFN, exp) & 0xff) != 0x10) {
++        exp = (cfg_readl(t, 0, TP_DEVFN, exp) >> 8) & 0xfc;
++    }
++    g_assert_cmpint(exp, !=, 0);
++    cfg_writel(t, 0, TP_DEVFN, exp + 0x18, 0x0100);
++    g_assert_cmphex(cfg_readl(t, 1, 0, 0), ==, 0x8232104c);
++    cfg_writel(t, 1, 0, 0x18, 0x00050201);
++    cfg_writel(t, 1, 0, 0x20, DOCK_WIN_REG);
++    cfg_writel(t, 1, 0, 0x04, 0x0006);
++    cfg_writel(t, 2, 2 << 3, 0x18, 0x00050502);
++    cfg_writel(t, 2, 2 << 3, 0x20, DOCK_WIN_REG);
++    cfg_writel(t, 2, 2 << 3, 0x04, 0x0006);
++    g_assert_cmphex(cfg_readl(t, 5, 0, 0), ==, 0x000d1b36);    /* xHCI */
++}
++
++/*
++ * q35, tunnel port tp0 on pcie.0 (two for Ice Lake), host at 00:04.0 with
++ * @profile, a TB3 dock (dialect=tb3 dock=on) on port 1 whose usb-drive is
++ * the image.
++ */
++static T *icm_start(const char *profile)
++{
++    T *t = g_new0(T, 1);
++    bool icl = !strcmp(profile, "tb3-ice-lake");
++
++    t->img = make_img();
++    t->qts = qtest_initf("-machine q35 "
++                         "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-"
++                         "support=off "
++                         "-drive if=none,id=disk0,file=null-co://,"
++                         "format=raw "
++                         "-blockdev driver=file,node-name=ub,filename=%s "
++                         "-device usb4-tunnel-port,id=tp0,bus=pcie.0,"
++                         "addr=0x3,chassis=1,settle-ms=200 %s "
++                         "-device usb4-host,id=u4,bus=pcie.0,addr=0x4,"
++                         "tunnel-port=tp0%s,profile=%s "
++                         "-device usb4-device,id=enc0,bus=u4.0,port=1,"
++                         "dialect=tb3,dock=on,drive=disk0,serial=QTU3,"
++                         "usb-drive=ub",
++                         t->img,
++                         icl ? "-device usb4-tunnel-port,id=tp1,bus=pcie.0,"
++                               "addr=0x5,chassis=2,settle-ms=200" : "",
++                         icl ? ",tunnel-port2=tp1" : "", profile);
++    pc_alloc_init(&t->alloc, t->qts, ALLOC_NO_FLAGS);
++    return t;
++}
++
++/*
++ * The TB3 half of USB3 tunneling: no USB3 adapter anywhere, the dock's
++ * USB comes through the PCIe tunnel the firmware CM builds (Alpine Ridge:
++ * on the driver's approve, ICM-PROTOCOL.md 7; Ice Lake: by itself at
++ * plug, ICM-ICE-LAKE.md 3.4). The dock's usb-storage is addressed and read
++ * on the dock's own xHCI; a cable pull closes the gate at once and removes
++ * the dock's functions.
++ */
++static void icm_dock_case(const char *profile, bool approve)
++{
++    T *t = icm_start(profile);
++    uint32_t w[64], cmd[6];
++    g_autofree char *usb = NULL, *xhci = NULL;
++    unsigned n, gen;
++    X x;
++
++    if (approve) {
++        uint32_t dr = 0x00000003;
++
++        rings_setup(t, 0, NHI_DEVFN);
++        g_assert_cmphex(mailbox(t, 0x23), ==, 0x23);
++        tx_frame(t, PDF_ICM_CMD, &dr, 1);
++        g_assert_cmpuint(rx_wait(t, w, &n, 50), ==, PDF_ICM_RESP);
++        g_assert_cmphex(w[0] & 0xff, ==, 0x03);
++        g_assert_cmpuint(rx_wait(t, w, &n, 50), ==, PDF_ICM_EVENT);
++        g_assert_cmphex(w[0] & 0xff, ==, 0x03);         /* connected */
++        g_assert_false(gate_open(t));
++        cmd[0] = 0x00000004;
++        memcpy(&cmd[1], &w[1], 16);
++        cmd[5] = 0x10 | (((w[5] >> 8) & 0xff) << 8);
++        tx_frame(t, PDF_ICM_CMD, cmd, 6);
++        g_assert_cmpuint(rx_wait(t, w, &n, 50), ==, PDF_ICM_RESP);
++        g_assert_cmphex(w[0], ==, 0x01000004);
++    }
++    gen = dock_gen(t, 50);
++    g_assert_cmpuint(gen, !=, 0);
++    g_assert_true(gate_open(t));
++    dock_map(t);
++    xhci_start(&x, t, 5, 0, DOCK_WIN);
++    storage_io(&x, 1);
++
++    qom_set_bool(t, ENC0, "x-cable", false);
++    g_assert_false(gate_open(t));
++    g_assert_cmphex(cfg_readl(t, 5, 0, 0), ==, 0xffffffff);
++    g_assert_cmphex(qtest_readl(t->qts, DOCK_WIN), ==, 0xffffffff);
++    usb = g_strdup_printf("tp0-dock%u-usb", gen);
++    xhci = g_strdup_printf("tp0-dock%u-xhci", gen);
++    for (int i = 0; i < 50 && peripheral_exists(t, usb); i++) {
++        step(t, 100);
++    }
++    g_assert_false(peripheral_exists(t, usb));
++    g_assert_false(peripheral_exists(t, xhci));
++    t_stop(t);
++}
++
++static void test_icm_dock_ar(void)
++{
++    icm_dock_case("tb3-alpine-ridge", true);
++}
++
++static void test_icm_dock_icl(void)
++{
++    icm_dock_case("tb3-ice-lake", false);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    if (!qtest_has_device("qemu-xhci") || !qtest_has_device("usb-storage")) {
++        g_test_skip("qemu-xhci and usb-storage needed");
++        return g_test_run();
++    }
++    qtest_add_func("/usb4-usb3/setup-data-teardown",
++                   test_setup_data_teardown);
++    qtest_add_func("/usb4-usb3/surprise-unplug", test_surprise_unplug);
++    qtest_add_func("/usb4-usb3/fault-rule", test_fault_rule);
++    qtest_add_func("/usb4-usb3/hub", test_hub);
++    qtest_add_func("/usb4-usb3/system-reset", test_system_reset);
++    qtest_add_func("/usb4-usb3/preos", test_preos);
++    qtest_add_func("/usb4-usb3/refused", test_refused);
++    qtest_add_func("/usb4-usb3/icm-dock-ar", test_icm_dock_ar);
++    qtest_add_func("/usb4-usb3/icm-dock-icl", test_icm_dock_icl);
 +    return g_test_run();
 +}
 diff --git a/tests/qtest/x86-smm-tlb-test.c b/tests/qtest/x86-smm-tlb-test.c

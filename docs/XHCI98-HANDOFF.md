@@ -17,8 +17,9 @@ a new legacy-Windows driver can be developed and debugged without hardware:
   switch, with its published IDs and vendor quirks; public sources only, nothing
   captured, [USB4-HOSTS.md](USB4-HOSTS.md) §5). Device routers (`usb4-device`) with an
   NVMe behind a PCIe tunnel, docks (PCIe switch + NVMe + NIC + xHCI), daisy chains, a
-  second port, USB3 tunnelling, hot-plug, and an optional pre-OS firmware CM
-  (`preos-cm=on`). `device-model=asm2464` is a **real** device router: the ASMedia
+  second port, USB3 tunnelling (QEMU USB devices on a `qemu-xhci` behind the tunnel,
+  [USB3-TUNNEL.md](USB3-TUNNEL.md), §6e), hot-plug, and an optional pre-OS firmware CM
+  (`preos-cm=on`, with `preos-usb3=on` also a USB3 tunnel). `device-model=asm2464` is a **real** device router: the ASMedia
   ASM2464PD of an ORICO USB4 NVMe enclosure, reproduced from a capture (97.1% replay
   match, [captures/ORICO-ASM2464.md](captures/ORICO-ASM2464.md)).
 - **Thunderbolt 3 host (`profile=tb3-alpine-ridge`)**: the maintainer's ThinkPad P14s
@@ -437,6 +438,51 @@ For your test (a USB stick mid-copy on the TB xHCI, then a surprise removal):
 - Removing the devnode automatically needs an ACPI-mode guest with `HOTPLUG=acpi`.
 - Otherwise the removal reaches Windows 2000 when xhci98.sys or the user triggers a
   rescan, or when xhci98.sys reports the device gone itself.
+
+## 6e. USB3 tunnels: how xHCI98 legs use them
+
+Reference: [USB3-TUNNEL.md](USB3-TUNNEL.md) (branch `usb3-tunnel`, QEMU `c8d878e`, 2026-10-22). The
+USB3 tunnel is a software-CM (USB4) feature; xHCI98's `tbt_u4cm.c` builds it
+(`XhciCmUsb3Tunnel`), and its xHCI driver sees the result as a connect on the host's own
+xHCI root port.
+
+- **Kit lines** (i440FX or q35, generic profile): a `qemu-xhci` (`id=xhci`), the USB
+  devices on it (`usb-storage,id=stor0,bus=xhci.0,port=1,drive=...`; a `usb-hub` with
+  devices behind it for a dock's hub), `usb3-xhci=xhci,usb3-port1=1` on `usb4-host`
+  (ACPI `_DSD` only), and `usb3-dev=stor0[:hub0]` on the `usb4-device`. Until the CM has
+  the tunnel up the devices are not on the xHCI at all, so a USB device seen at boot
+  with `preos-cm=off` means the leg's command line is wrong, not the CM.
+- **What to check**: `qom-get /machine/peripheral/enc0 x-usb3-tunnel` reads
+  `up reason=up ups=1 downs=0 attached=stor0:1` once the CM built it; `ups`/`downs` count
+  every rebuild, so a CM that tears down and rebuilds on every rescan shows up there. The
+  `usb4_usb3_inputs` / `usb4_usb3_path` traces say which condition is missing (USB3
+  Tunneling On, a path entry, a lane ingress without buffers, Path Enable).
+- **Teardown and unplug legs**: the devices leave the xHCI inside the CM's first
+  teardown write and inside `device_del` / `x-cable=false` ([FAULTS.md](FAULTS.md)), so
+  the xHCI driver gets the disconnect with I/O possibly in flight: a copy to the USB disk
+  while `x-cable` goes false is the USB analogue of the NVMe unsafe-unplug leg (43.21).
+  A replug comes back with the tunnel down: the CM must build it again (its 500 ms gap
+  after a USB3 teardown, Guide 5.5.1 step 1, is the CM's own timing; the model does not
+  enforce it).
+- **Fault legs**: `pdf=write route=1 act=drop+unplug dev=enc0` armed just before the
+  device's USB3 Path Enable write (the write takes effect, its reply never comes, the
+  router is gone); `pdf=read route=0 act=host-reset` with the tunnel up (the CM must
+  restart and rebuild).
+- **Firmware-built tunnel**: `preos-cm=on,preos-usb3=on` gives a USB3 tunnel the OS CM
+  finds at start (lane HopIDs 10/11, next to the PCIe tunnel's 8/9); it exercises the
+  CM's discovery of existing USB3 paths (`tbtU4Follow`) and its keep-or-tear-down
+  decision.
+- **Under the ICM**: none. The firmware-CM profiles are Thunderbolt 3 host routers with
+  no USB3 adapter (`usb3-dev` is refused there), which is what `IcmNoUsb3` assumes on the
+  Falcon, Alpine and Titan Ridge rows. USB behind a TB3 dock is the dock's own xHCI in
+  the PCIe tunnel (`dialect=tb3,dock=on,usb-drive=<node>`, q35), approved like the NVMe.
+  The Ice Lake row's real USB4 hosts under the ICM (Tiger Lake, Alder Lake) build USB3
+  tunnels in firmware; that host is not modelled, so the row's "not known" stays
+  untested here.
+
+A kit switches to the new binary as in §6c (copy the exe, update the SHA-256). With no
+`usb3-dev` and no `preos-usb3` it behaves as the previous binary, except that `usb3-dev`
+is now refused where it could never work (TB3 routers, the ASM2464, firmware-CM hosts).
 
 ## 7. Status and open items
 

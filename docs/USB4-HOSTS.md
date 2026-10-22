@@ -163,6 +163,11 @@ interface's BAR0. It does the following:
    PCIe adapters.
 4. Consumes its own hot plug events and hands over without cleaning up.
 
+With `preos-usb3=on` it also sets USB3 Tunneling On and builds a USB3 tunnel to each
+device router with a USB3 Up adapter (bandwidth handshake, HopID 8 paths at weight 2 with
+lane HopIDs 10 and 11, Path Enable with Valid), so the `usb3-dev` devices are on the xHCI
+before the OS ([USB3-TUNNEL.md](USB3-TUNNEL.md) §4).
+
 It finds capabilities by walking the chains, so it works on `intel-adl` too. The tunnel
 evaluator sees the tunnels up and the NVMe endpoints are cold plugged, so the firmware and
 the OS find them on the PCI bus at boot. A power-on reset re-runs the firmware CM while

@@ -266,8 +266,21 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
 
 ## M7. USB3 tunneling
 
-- [ ] USB3 down adapter on the host router mapped to a QEMU xHCI instance, USB3 up adapter on
+- [x] USB3 down adapter on the host router mapped to a QEMU xHCI instance, USB3 up adapter on
   a dock-style device router, in both dialects.
+  Done 2026-10-22 ([USB3-TUNNEL.md](USB3-TUNNEL.md)): `usb4-device usb3-dev=` names the
+  QEMU USB devices (a `usb-hub` with its subtree included) behind the USB3 Up adapter; they
+  are on the `qemu-xhci` only while the tunnel the CM built is up, leave it inside the
+  write that takes it down (the gate), and leave on `device_del`, `x-cable=false`, host
+  router and system reset; `x-usb3-tunnel` shows the state; `preos-usb3=on` makes the
+  pre-OS firmware CM build the tunnel too. USB4 dialect only: a Thunderbolt 3 router has
+  no USB3 adapter, so in the TB3 dialect (and under the firmware-CM profiles, which are
+  TB3 host routers) USB reaches a dock through the PCIe tunnel to the dock's own xHCI
+  (`dock=on usb-drive=`), and `usb3-dev` is refused there. Verified by qtest
+  `usb4-usb3-test` (9 cases: setup, data through the tunnel read with bulk-only SCSI by an
+  xHCI driver in the test, teardown, surprise unplug, a fault rule combined with it, hub
+  subtree, system reset, pre-OS tunnel, refusals, and the TB3 dock's xHCI under the
+  Alpine Ridge and Ice Lake firmware CMs); the other eleven usb4 suites pass unchanged.
 - [x] Generic profile, Windows 11 half, 2026-10-14: the Windows built-in CM sets USB3
   Tunneling On, programs HopID 8 USB3 paths both ways, enables both USB3 adapters and does
   the bandwidth request/acknowledge handshake in router config space (no xHCI register
@@ -278,6 +291,9 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
   through a daisy chain in the fabric harness.
 - [ ] Exit: a USB device behind the tunnel appears on the xHCI in Linux and Windows 11.
   Suspend and resume keep device relations.
+  Windows 11 (built-in CM) was shown on 2026-10-14 (above). Owed: Linux (software CM,
+  `usb4-generic`, the `usb-storage` on the xHCI after the CM's tunnel, gone at unplug)
+  and suspend and resume on both.
 
 ## Later, unscheduled
 

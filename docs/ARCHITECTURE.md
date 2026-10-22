@@ -32,7 +32,9 @@ client only as `profile=tb3-titan-ridge` (`ICM-TITAN-RIDGE.md`, all inferred).
 
 **Non-goals for the first two profiles.** Tracked in `ROADMAP.md`:
 
-- USB3 tunneling and an integrated xHCI.
+- USB3 tunneling and an integrated xHCI. (Later added: USB3 tunneling on the generic
+  profile, [USB3-TUNNEL.md](USB3-TUNNEL.md), roadmap M7; the Alpine Ridge integrated
+  xHCI for the USB fallback, `ICM-PROTOCOL.md` 13.)
 - DisplayPort tunneling.
 - Inter-domain (host-to-host) links.
 - CL low-power states, and TMU behaviour beyond what guests need to proceed.
