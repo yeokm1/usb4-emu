@@ -270,8 +270,29 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
 - [ ] Exit: unplug during enumeration or during I/O, dropped and stale replies, and guest
   reboot all recover with no stale devices and no stuck interrupts, on Linux and Windows
   11, in both profiles.
-  The stimuli exist and are qtest-verified at the device level (above); the guest runs
-  (Linux and Windows 11, both profiles) are not yet done.
+  The stimuli exist and are qtest-verified at the device level (above). Guest runs
+  2026-10-22 ([GUEST-EXITS.md](GUEST-EXITS.md), QEMU `c8d878e`, TCG):
+  - [x] Linux, `usb4-generic` (software CM): unplug during enumeration (first read of the
+    router dropped and the router pulled), unplug during an O_DIRECT NVMe read held by the
+    tunnel port harness, a dropped read (retried), every read dropped ("no switch found"),
+    a stale reply 500 ms late, a stale duplicate, and a guest reboot. After each: no
+    router, NVMe or USB device left after the unplug, all back with the same data after
+    the replug, idle interrupt deltas 0 on every thunderbolt, nvme and xhci vector, no
+    `nobody cared`, hung task, `BUG:` or `WARNING:`, nothing in D state.
+  - [x] Linux, `tb3-alpine-ridge` (firmware CM): device-connected event lost with the
+    router pulled, event seen with the router pulled, router pulled at the approve, the
+    approve reply dropped (resent), 12 s late (past the 10 s timeout), duplicated, unplug
+    during a held NVMe read, two guest reboots. Same checks, same result.
+  - [x] Windows 11 (the existing test overlay, built-in CM), `usb4-generic`: unplug during
+    enumeration, unplug during a raw NVMe read held by the harness (Windows logs disk
+    surprise removal, no hang), a dropped read, a read 3 s late, a duplicate, and a guest
+    reboot. After each the router, NVMe and USB disk are absent or present as expected
+    with `ConfigManagerErrorCode` 0, the NTFS test files on both disks hash the same, and
+    while idle (QEMU traces, 20-30 s windows) the NHI and the xHCI raise no interrupt and
+    the NVMe 0-36 (Windows' own background I/O, no storm).
+  - [ ] Windows 11, `tb3-alpine-ridge`: owed. It needs the Intel Thunderbolt driver
+    package bound to the Alpine Ridge NHI, which is the open M3 smoke gate (the Windows
+    11 overlays in the kits run the built-in CM on the generic profile).
 
 ## M7. USB3 tunneling
 
@@ -300,9 +321,22 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
   through a daisy chain in the fabric harness.
 - [ ] Exit: a USB device behind the tunnel appears on the xHCI in Linux and Windows 11.
   Suspend and resume keep device relations.
-  Windows 11 (built-in CM) was shown on 2026-10-14 (above). Owed: Linux (software CM,
-  `usb4-generic`, the `usb-storage` on the xHCI after the CM's tunnel, gone at unplug)
-  and suspend and resume on both.
+  Windows 11 (built-in CM) was shown on 2026-10-14 (above). Guest runs 2026-10-22
+  ([GUEST-EXITS.md](GUEST-EXITS.md), QEMU `c8d878e`, TCG):
+  - [x] Linux, software CM on `usb4-generic`: the CM builds the USB3 tunnel during
+    enumeration and `usb 2-1` (`USB3EMU01`) connects on the `qemu-xhci` after the path
+    activation, not before; `x-cable=false` disconnects it with the router (also with an
+    O_DIRECT write running: `dd` gets EIO, nothing hangs), the replug brings it back with
+    its data. S3 (`mem`, woken by `system_wakeup`), twice: Linux restarts the USB3 tunnel
+    and resets the same USB device (same device number, same data).
+  - [x] Windows 11, built-in CM, with this binary: the USB disk is on the xHCI with the
+    tunnel up, leaves with `x-cable=false` and returns with its NTFS data.
+  - [ ] Windows 11 suspend and resume: owed. The guest offers no S3 ("An internal system
+    component has disabled this standby state: Graphics", the basic display adapter on
+    `-vga std`) and no S0 low power idle.
+  - Finding: across Linux S3 the NVMe in the PCIe tunnel does not keep its device (the
+    model replaces the endpoint when Linux bounces the PCIe paths on resume and pciehp
+    removes it); see GUEST-EXITS.md "S3 and the PCIe tunnel". Owner question.
 
 ## Later, unscheduled
 

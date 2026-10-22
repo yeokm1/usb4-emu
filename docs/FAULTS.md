@@ -155,6 +155,7 @@ Verified by qtest `usb4-fault-test` (2026-10-22): dropped, delayed and duplicate
 responses; a dropped control read on the software CM path; a delayed reply discarded by
 a host interface reset; QMP and rule-fired host router resets; safe mode in the
 mailbox; surprise removal during enumeration on both profiles and during a held NVMe
-read under the firmware CM, each with a replug. The guest-level exit (Linux and
-Windows 11 recovering with no stale devices and no stuck interrupts, both profiles) is
-not yet run.
+read under the firmware CM, each with a replug. The guest-level runs (2026-10-22,
+[GUEST-EXITS.md](GUEST-EXITS.md)) pass on Linux in both profiles and on Windows 11 in the
+generic profile; Windows 11 under the Alpine Ridge firmware CM waits for the Intel driver
+(M3 smoke gate).
