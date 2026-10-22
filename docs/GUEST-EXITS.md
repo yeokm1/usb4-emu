@@ -230,7 +230,7 @@ QEMU `ec6776b` (`bin-ec6776b`), `scripts/run-win11-ar.sh` (bridge topology, DSN
 1.41.1379.0 installed with `pnputil` (published `oem1.inf`).
 
 - M3 smoke gate: the NHI binds as "Thunderbolt(TM) Controller - 15BF" (instance
-  `...ŭ3423445AB000120`, from the DSN), status OK; the driver sends driver ready
+  `...5553423445AB000120`, from the DSN), status OK; the driver sends driver ready
   (`0x03`), boot ACL (`0x18`) and get route; System log `nhi` 9001 "driver is loaded and
   initialized connection to HW", driver 1.41.1379.0, NVM version Unknown, and 9002
   "Thunderbolt device is connected", TS3 Plus, CalDigit, Inc., NVM version Invalid, plus
