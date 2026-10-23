@@ -88,7 +88,7 @@ must never use Intel IDs, because those select quirks and ICM probing.
 |---|---|---|
 | Register layout | Spec §12 host interface registers | The de-facto NHI layout that B `nhi_reg.h` describes; Alpine Ridge uses the same, with 12 rings (`ICM-PROTOCOL.md` §2.1). |
 | Firmware status register | ICM enable, NVM auth done, CIO reset request bits. AR profile resets to the captured `0x800001a1`. | `ICM-PROTOCOL.md` §2.2. |
-| NHI mailbox (AR profile) | inbound data and command (request and error bits), outbound with the firmware operating mode; mode 3 (CM), outbound resets to the captured `0x800003f5`. Commands: allow-all-devices, save-devices, disconnect-PCIe-paths, driver-unloads, disconnect-PA, disconnect-PB. | `ICM-PROTOCOL.md` §2.3. |
+| NHI mailbox (AR profile) | inbound data and command (request and error bits), outbound with the firmware operating mode; mode 3 (CM), outbound resets to the captured `0x800003f5`. Commands: allow-all-devices, save-devices (S3/s2idle restore of approved devices, R34), disconnect-PCIe-paths, driver-unloads, disconnect-PA, disconnect-PB. | `ICM-PROTOCOL.md` §2.3, R34. |
 | Interrupts | MSI (single vector) and INTx; MSI-X optional | Linux has no INTx fallback. On the real P14s Linux used MSI-X (16 vectors) with the Intel auto-clear bit; without MSI-X it falls back to single MSI (`ICM-PROTOCOL.md` §2.5). The xhci98 legacy Windows drivers poll. |
 | Tunneled PCIe | one bridge whose secondary bus is gated by tunnel state | q35: `usb4-tunnel-port`, a `pcie-root-port` subclass. i440FX (legacy Windows): `usb4-tunnel-bridge`, a `pci-bridge` subclass with SHPC. Names provisional, see §4.4. |
 
