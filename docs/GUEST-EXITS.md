@@ -170,8 +170,22 @@ re-announced it approved (connection id 0, boot bit clear); after S3 it had rebu
 tunnel before Linux's driver ready (captures/P14S-SUSPEND-2026-10-23.md §10). The
 emulated ICM now does the same for devices saved by mailbox 0x05: it tunnels them again
 within the wakeup reset, so the endpoint never sees the tunnel go down (qtest
-`/usb4-icm/save-devices`). A Linux guest S3 leg on `tb3-alpine-ridge` with this model
-is owed (no VM run for this change).
+`/usb4-icm/save-devices`).
+
+Linux guest leg with R34 (2026-10-23): QEMU efa24f1 (binary sha256 `f404d37af36cd8f7...`),
+kit `E:\usb4-emu-vms\ps` (the link-retrain kit's launcher with `PROFILE=tb3-alpine-ridge`,
+QMP 49100, serial 49101), Kubuntu 26.04.1 live, kernel 7.0.0-30, q35, TCG, 4 vCPUs; TB3
+device router with the NVMe (`serial=USB4EMU01`), security `user`, pre-boot off. The
+device was authorised through sysfs and a fresh 32 MiB random pattern written to
+`nvme0n1` with O_DIRECT (SHA-256 prefix `fb3ac26bf1a0ab74`); each check reads it back
+with O_DIRECT and records the `nvme0` name, `0-1/authorized` and the inode of
+`/sys/devices/pci0000:00/0000:00:05.0/0000:01:00.0/config` (31872).
+
+| Leg | Result |
+|---|---|
+| s2idle (`rtcwake -m freeze -s 20`) | Linux sent mailbox 0x05 then 0x07; on resume, driver ready and the device announced **approved, connection id 0** (model trace). **The NVMe is kept**: same `nvme0`, same config inode, `authorized` 1 (no re-authorisation), the pattern reads back; no pciehp message; the nvme driver re-initialised its queues. Quirk: the RTC alarm did not wake the guest from s2idle under QEMU (it stayed frozen with QEMU status `running`, and a key press did not wake it either); the ACPI power button (`system_powerdown`) did, and the guest did not power off |
+| S3 (`echo mem`, QEMU `suspended`, `system_wakeup`) | 0x05, 0x07; at the wakeup reset `ICM port 1: saved device restored`, then driver ready and the device announced approved, id 0. **The NVMe is kept**: same `nvme0`, inode, `authorized` 1, pattern; `PM: suspend entry (deep)`, "Waking up from system sleep state S3"; no pciehp message; one tunnel transition in the whole run (the approve), none at the S3 |
+| Control: cold `system_reset` | The tunnel goes down (`surprise`) and the endpoint is removed (`none gen=1 gate=closed`); after the reboot the device is announced unapproved (id 2), `authorized` 0, no NVMe: a cold reset is a power-on without pre-boot, as before |
 
 ### With the link retrain (2026-10-22)
 
