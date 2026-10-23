@@ -194,3 +194,13 @@ What `scripts/run-cm-test.sh` adds to a q35 machine:
 GPL-2.0-only, the same as xhci98. See `LICENSE`,
 `NOTICE` for incorporated third-party material, and `AGENTS.md` "Licence rules" for how
 Linux (GPL-2.0-only), FreeBSD (BSD-2-Clause) and Intel tbtools (MIT) code may be adapted.
+
+## AI usage
+
+This project was developed with substantial help from AI coding agents:
+
+- Claude Fable 5.1 for planning
+- Claude Opus 5.5 for coding
+- Codex GPT 6 Astra as an adversarial reviewer
+
+The agents wrote and revised code, tests and documentation under the guidance in [AGENTS.md](AGENTS.md).
