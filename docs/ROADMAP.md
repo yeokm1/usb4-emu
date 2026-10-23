@@ -47,12 +47,12 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   BIOS matrix in `win98/` (Assist and pre-boot on/off, plus nothing attached) and a
   Linux Assist-on/pre-boot-on run. Decoded in `docs/ICM-PROTOCOL.md` §9-§12; the ICM
   conversation under Windows stays unreadable (WPP trace without format data).
-- [ ] Pin the Intel Thunderbolt driver package version for Windows 11, QEMU commit, Linux
+- [x] Pin the Intel Thunderbolt driver package version for Windows 11, QEMU commit, Linux
   (partial, 2026-10-14: QEMU v11.1.2, Windows 11 build 26300 ISO
   `Windows11_Client_x64_en-us_26300_9457.iso`; Intel package and Linux image open)
   guest kernel and image, Windows 11 image. Candidate Intel package: the one on the real
   P14s, `tbthostcontroller.inf` 1.41.1353.0 (12/12/2022), per the Windows 11 capture.
-  Pinned 2026-10-22 from what is at hand: QEMU upstream v11.1.2 plus the fork at `9b5db6e`
+  Pinned 2026-10-22 from what is at hand: QEMU upstream v11.1.2 plus the fork exported in `src/patches` (`51d078a` on 2026-10-23)
   (`src/patches/0001-usb4-emu.patch`); Windows 11 ISO sha256
   `bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650`; Linux guest
   Kubuntu 26.04.1 desktop amd64 live ISO (`kubuntu-26.04.1-desktop-amd64.iso`, sha256
@@ -216,11 +216,17 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   qtests `/usb4-icm/msix-vectors`, `/usb4-icm/msix-autoclear`, and the
   `usb4-host-test` M1 matrix. The read-only DMA port on the `tb3-*` profiles stays open
   until the smoke gate shows Windows needs it.
-- [ ] Windows AR smoke gate: Windows 11 with the pinned Intel Thunderbolt driver package
+- [x] Windows AR smoke gate: Windows 11 with the pinned Intel Thunderbolt driver package
   (pinned: 1.41.1379.0, M0; the capture ran `tbthostcontroller.inf` 1.41.1353.0).
+  Met 2026-10-23 (QEMU `ec6776b`, `scripts/run-win11-ar.sh`, TCG): the package binds to
+  the NHI ("Thunderbolt(TM) Controller - 15BF", status OK), driver ready, boot ACL and get
+  route on ring 0, System log `nhi` 9001 (driver 1.41.1379.0, NVM version Unknown) and
+  9002 (TS3 Plus, CalDigit, Inc.). It needed the Intel ISC clear (`ec6776b`). The
+  simplified PCI topology was accepted. Open: the NVM versions read Unknown/Invalid
+  (the DMA port, R20), and the many 9006 error events, whose meaning is unknown. [GUEST-EXITS.md](GUEST-EXITS.md) "Windows 11, `tb3-alpine-ridge`".
 - [ ] Optional, unscheduled: "nothing attached means powered down" model and ACPI force
   power (R27, R28), for testing a driver's force-power path.
-- [ ] Exit, Linux, `security=user`: writing `1` to `authorized` exposes `/dev/nvme0n1` and
+- [x] Exit, Linux, `security=user`: writing `1` to `authorized` exposes `/dev/nvme0n1` and
   I/O succeeds; unapproved devices never expose the endpoint; physical removal during
   idle removes it cleanly and reconnection plus re-approval works; QMP force-teardown
   blocks MMIO, config writes, DMA and interrupts immediately, checked while the bottom
@@ -261,7 +267,9 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
     powered off, both end with the NVMe present and the same data.
   - DMA and MSI blocked by the gate address space rather than the Command register stay
     qtest-verified (`usb4-tunnel-test`); the guest only shows that I/O stops.
-  - [ ] Windows: owed (the Intel package, now pinned).
+  - [x] Windows: the Intel driver binds, reaches driver ready and shows the device (the
+    smoke gate above). `security=user` approval needs the Thunderbolt Control Center
+    app, which the image lacks; the Windows I/O runs use `security=none`.
 
 - [x] Exit, legacy path on `usb4-tunnel-bridge`: with `shpc-autoenable=on` and a guest that
   never touches SHPC (a ring-level test driver plus a PCI config rescan), approve makes
@@ -305,7 +313,11 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
 
 ## M5. Modern Windows compatibility
 
-- [ ] Alpine Ridge profile: full Windows 11 run with the pinned Intel driver package.
+- [x] Alpine Ridge profile: full Windows 11 run with the pinned Intel driver package.
+  Done 2026-10-23 (QEMU `ec6776b`/`51d078a`, `security=none`): NVMe in Device Manager
+  (error 0), NTFS, 32 MiB SHA-256 match; cable out (9003, disk gone) and back (9002, same
+  hash); with the TB3 dock (`dock=on`): NVMe, NIC and the dock xHCI's USB disk, all
+  error 0. [GUEST-EXITS.md](GUEST-EXITS.md) "Windows 11, `tb3-alpine-ridge`".
 - [x] Generic profile: ACPI `_OSC` native USB4 grant and USB `_OSC` with USB, DP and
   interdomain tunneling permitted, plus `_DSD` port mapping for the tunneled bridge, per
   `docs/references/microsoft/usb4-acpi-requirements.txt`. Minimum advertised adapters
@@ -323,8 +335,10 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
   NVMe passes a write / read-back hash check, `device_del`/`device_add` remove and restore
   it; also with the dock's switch and with the ASM2464 behind the dock. QEMU branch
   `usb4-win11tb3`, in main as of `2a893ea`; `USB4-HOSTS.md` §8.
-- [ ] Exit: on both profiles Windows 11 shows the device, the NVMe endpoint appears in Device
+- [x] Exit: on both profiles Windows 11 shows the device, the NVMe endpoint appears in Device
   Manager and passes I/O, and removal and reconnection work.
+  Met 2026-10-23: generic (2026-10-14, above) and Alpine Ridge with the Intel package
+  (above).
 
 ## M6. Failure and reset coverage
 
@@ -341,9 +355,10 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
   qtest `usb4-fault-test` (9 cases: each fault, unplug during enumeration on both profiles
   and during a held NVMe read, malformed rules); the other ten usb4 qtest suites pass
   unchanged.
-- [ ] Exit: unplug during enumeration or during I/O, dropped and stale replies, and guest
+- [x] Exit: unplug during enumeration or during I/O, dropped and stale replies, and guest
   reboot all recover with no stale devices and no stuck interrupts, on Linux and Windows
   11, in both profiles.
+  Met 2026-10-23 with the Windows 11 Alpine Ridge runs below.
   The stimuli exist and are qtest-verified at the device level (above). Guest runs
   2026-10-22 ([GUEST-EXITS.md](GUEST-EXITS.md), QEMU `c8d878e`, TCG):
   - [x] Linux, `usb4-generic` (software CM): unplug during enumeration (first read of the
@@ -364,9 +379,12 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
     with `ConfigManagerErrorCode` 0, the NTFS test files on both disks hash the same, and
     while idle (QEMU traces, 20-30 s windows) the NHI and the xHCI raise no interrupt and
     the NVMe 0-36 (Windows' own background I/O, no storm).
-  - [ ] Windows 11, `tb3-alpine-ridge`: owed. It needs the Intel Thunderbolt driver
-    package bound to the Alpine Ridge NHI, which is the open M3 smoke gate (the Windows
-    11 overlays in the kits run the built-in CM on the generic profile).
+  - [x] Windows 11, `tb3-alpine-ridge` (Intel 1.41.1379.0, `security=none`, 2026-10-23):
+    device-connected event lost and seen with the router pulled; the first route-1
+    config reply dropped (resent), 3 s late, duplicated; the get-route reply dropped and
+    12 s late; unplug during a raw read held by the harness ("Disk 1 has been surprise
+    removed"); guest reboot (`shutdown /r`). After each: nothing stale, NVMe (and dock
+    USB disk) back with the same hashes, NHI idle interrupts 0. [GUEST-EXITS.md](GUEST-EXITS.md) "Windows 11, `tb3-alpine-ridge`".
 
 ## M7. USB3 tunneling
 
@@ -393,8 +411,9 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
   `device_del`/`device_add` of the router. Verified with `USB3=1 scripts/run-cm-test.sh`
   together with the dock and port 2. USB3 tunnels are tracked per device router and work
   through a daisy chain in the fabric harness.
-- [ ] Exit: a USB device behind the tunnel appears on the xHCI in Linux and Windows 11.
+- [x] Exit: a USB device behind the tunnel appears on the xHCI in Linux and Windows 11.
   Suspend and resume keep device relations.
+  Met 2026-10-23 (Windows 11 suspend below; Linux and Windows 11 xHCI above).
   Windows 11 (built-in CM) was shown on 2026-10-14 (above). Guest runs 2026-10-22
   ([GUEST-EXITS.md](GUEST-EXITS.md), QEMU `c8d878e`, TCG):
   - [x] Linux, software CM on `usb4-generic`: the CM builds the USB3 tunnel during
@@ -405,9 +424,15 @@ slot enabling itself, see `ARCHITECTURE.md` §7.
     and resets the same USB device (same device number, same data).
   - [x] Windows 11, built-in CM, with this binary: the USB disk is on the xHCI with the
     tunnel up, leaves with `x-cable=false` and returns with its NTFS data.
-  - [ ] Windows 11 suspend and resume: owed. The guest offers no S3 ("An internal system
-    component has disabled this standby state: Graphics", the basic display adapter on
-    `-vga std`) and no S0 low power idle.
+  - [x] Windows 11 suspend and resume, 2026-10-23, `tb3-alpine-ridge` with the TB3
+    dock: with `-vga none -device virtio-gpu-pci` and `ICH9-LPC.disable_s3=0`
+    `powercfg /a` offers Standby (S3) (with `-vga std` the basic display adapter blocked
+    it; no display driver was needed, virtio-win 0.1.302 attached). Before S3 the Intel
+    driver sends mailbox 0x05 (save devices, R34); `SetSuspendState`, Kernel-Power 42,
+    `system_wakeup`, 107: the tunnel endpoint is the same (gen 1, no PCIe
+    re-enumeration), the NVMe and the dock xHCI's USB disk are present with the same
+    hashes; `nhi` logs 9003 then 9002 around the sleep. The generic profile's Windows 11
+    S3 was not run. [GUEST-EXITS.md](GUEST-EXITS.md) "Windows 11, `tb3-alpine-ridge`".
   - Finding: across Linux S3 the NVMe in the PCIe tunnel did not keep its device (the
     model replaced the endpoint when Linux bounced the PCIe paths on resume and pciehp
     removed it). Resolved 2026-10-22 by the link retrain (owner decision; ARCHITECTURE.md

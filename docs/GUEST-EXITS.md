@@ -228,7 +228,7 @@ SHPC unless told to; the Thunderbolt driver approves, as a ring-level client wou
   after a rescan, same data.
 - Idle: deltas 0 on every thunderbolt and nvme vector, no warnings, no D state.
 
-## Windows 11, `tb3-alpine-ridge` with the Intel package (WIP, 2026-10-23)
+## Windows 11, `tb3-alpine-ridge` with the Intel package (2026-10-23)
 
 QEMU `ec6776b` (`bin-ec6776b`), `scripts/run-win11-ar.sh` (bridge topology, DSN
 `0x5553423445ab0001`), own overlay on the win11tb3 overlay, TCG 4 vCPUs, Intel DCH
@@ -254,7 +254,21 @@ QEMU `ec6776b` (`bin-ec6776b`), `scripts/run-win11-ar.sh` (bridge topology, DSN
   the get-route reply dropped, 12 s late: router, NVMe and hash back each time. Unplug
   during a raw 1 MiB read held by the harness (token 89307): "Disk 1 has been surprise
   removed", 9003, the reader process ends; replug: all back, same hash.
-- Owed: guest reboot leg, M7 Windows legs, Windows 11 S3 (virtio-win display driver).
+- Guest reboot (`shutdown /r`, with the TB3 dock, QEMU `51d078a`): driver ready again
+  (9001, 9002), the endpoint kept (gen 2), NVMe, NIC, dock xHCI and its USB disk error 0,
+  both hashes match; idle 20 s: NHI 0, xHCI 0, NVMe 2.
+- M7 with the TB3 dock (`dock=on usb-drive=`): the dock's xHCI (behind the tunnel's
+  switch, PCI path 00:05.0/00.0/02.0/00.0) and its USB disk appear, NTFS U:, 16 MiB
+  SHA-256 `BBE81CC2...`; `x-cable=false`: NVMe and USB disk gone; `true`: both back,
+  both hashes match.
+- S3: `-vga none -device virtio-gpu-pci -global ICH9-LPC.disable_s3=0` (the basic
+  display adapter on `-vga std` blocks S3); `powercfg /a`: Standby (S3) available. The
+  Intel driver sends mailbox 0x05 before sleeping; `rundll32 powrprof.dll,SetSuspendState
+  0,1,0`, QMP status suspended after 20 s, Kernel-Power 42; `system_wakeup`: 107,
+  Power-Troubleshooter 1, the ICM reset at wakeup re-announces the dock (9003, 9002),
+  the endpoint is the same generation, NVMe and USB disk present with the same hashes.
+- Guest shutdown from QMP (`system_powerdown`) and `shutdown /s` did not power the guest
+  off within 20 minutes under TCG; the runs end with QMP `quit`.
 
 ## S3 and the PCIe tunnel (finding, not part of the exits; resolved by the link retrain)
 

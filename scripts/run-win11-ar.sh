@@ -26,7 +26,11 @@
 #                 (R29; default 0x5553423445ab0001, so Windows keeps its
 #                 instance IDs and stored approvals across boots)
 #   VIRTIO_ISO    a virtio-win ISO to attach as a CD (guest drivers only)
-#   VGA           default "std"
+#   VGA           default "std". For Windows S3 use VGA=none and append
+#                 "-device virtio-gpu-pci -global ICH9-LPC.disable_s3=0": the basic
+#                 display adapter on -vga std disables S3 ("Graphics").
+#   Dock (M7):    DEV_OPTS=",dock=on,usb-drive=usbdisk" plus
+#                 -blockdev driver=qcow2,node-name=usbdisk,file.driver=file,file.filename=...
 #   TRACE_FILE    -D target for the usb4 traces (default $VM_DIR/trace.log)
 set -euo pipefail
 
