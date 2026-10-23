@@ -162,7 +162,16 @@ On `tb3-alpine-ridge` S3 (no exit requires it) the PCIe tunnel goes down at the 
 with reason `surprise` (the model's trace), the firmware CM re-announces the router, Linux logs "0-1: runtime resuming timed out" and "0-1:
 device disconnected", and the router is announced again unapproved (`authorized=0`),
 so the NVMe needs a new authorisation. Real Alpine Ridge firmware behaviour across S3
-is not captured.
+was not captured then.
+
+**Captured 2026-10-23, model changed (R34).** On the P14s the firmware keeps the tunnel:
+the ORICO's NVMe survived s2idle and S3, and after each resume the firmware
+re-announced it approved (connection id 0, boot bit clear); after S3 it had rebuilt the
+tunnel before Linux's driver ready (captures/P14S-SUSPEND-2026-10-23.md §10). The
+emulated ICM now does the same for devices saved by mailbox 0x05: it tunnels them again
+within the wakeup reset, so the endpoint never sees the tunnel go down (qtest
+`/usb4-icm/save-devices`). A Linux guest S3 leg on `tb3-alpine-ridge` with this model
+is owed (no VM run for this change).
 
 ### With the link retrain (2026-10-22)
 
@@ -179,7 +188,7 @@ first suspend; each check reads it back with O_DIRECT, with `sda` (buffered), th
 | S3 (`mem`, QEMU status `suspended`, `system_wakeup`), four boots | **The NVMe is kept**: same `nvme0`, same config inode, the pattern reads back (SHA-256 prefixes `c7d72d03`, `5c21b0f7`, `58323035`; the last written in the third boot and read again in the fourth), `sda` too; pciehp logs nothing, the nvme driver re-initialises its queues ("4/0/0 default/read/poll queues"). Model trace: the wakeup reset takes the tunnel down (`surprise`), `link retrain of gen 1: link down`, `cutoff`, `held`; Linux restores the routers and the paths (`tunnels restarted`), the tunnel comes up, `retrained`, gate open, generation 1 throughout |
 | Later `echo mem` in the same boot | QEMU never reaches `suspended` and resets nothing (no `usb4_fabric_reset`), yet Linux runs its whole resume path ("Low-level resume complete", `tunnels restarted`): the PCIe paths bounce on routers that kept their configuration, `admin-down` then `up`, which the model also takes as a retrain. NVMe kept in all 6 such cycles that were read back. Twice, in two other boots, the guest's user space stopped answering after such a cycle (serial getty and tty1 silent, all vCPUs idle, the kernel still printing); not seen in the boot with the full kernel log (five cycles), not attributed. Why QEMU skips the second suspend is not investigated (it predates this change: the earlier "S3 twice" leg did not check the run state) |
 | `x-cable=false` after the cycles (a real unplug) | pciehp "Link Down", "Card not present", `nvme0` gone, the endpoint removed (`removed`, generation 1); `x-cable=true` and authorisation bring a fresh endpoint (generation 2) with the same pattern |
-| `tb3-alpine-ridge`, one S3 | Unchanged outcome: the endpoint is held for the retrain at the wakeup reset, but the emulated ICM does not rebuild the tunnel (the router comes back unapproved, "runtime resuming timed out", "device disconnected"); pciehp turns the slot off and the guest slot command rule removes the endpoint. The NVMe needs a new authorisation, as before |
+| `tb3-alpine-ridge`, one S3 (before R34, 2026-10-23) | Unchanged outcome: the endpoint is held for the retrain at the wakeup reset, but the emulated ICM does not rebuild the tunnel (the router comes back unapproved, "runtime resuming timed out", "device disconnected"); pciehp turns the slot off and the guest slot command rule removes the endpoint. The NVMe needs a new authorisation, as before |
 
 #### Windows 7 with xHCI98's connection manager (owner's check of the defaults, 2026-10-23)
 

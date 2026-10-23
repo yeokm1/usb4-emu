@@ -1,6 +1,7 @@
 usb4-emu QEMU changes against v11.1.2
-Exported from branch usb4-emu at 46d96fb
+Exported from branch usb4-emu at efa24f1
 
+  efa24f1 usb4: AR ICM save devices (mailbox 0x05) restores tunnels across s2idle and S3, qtest
   46d96fb usb4: link retrain of a PCIe tunnel to the same router, qtest
   5bb712d tests/qtest: usb4-host M1 exit matrix and the Linux single-MSI path
   c8d878e usb4: USB3 tunnel gate, hub subtrees, x-usb3-tunnel, preos-usb3, qtest
@@ -5021,10 +5022,10 @@ index 0000000000000000000000000000000000000000..ce5f039a2035b2b6a68aa532663becd4
 +}
 diff --git a/hw/usb4/usb4-fabric-int.h b/hw/usb4/usb4-fabric-int.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..69ffbc5daada87b8a346ad2f72c9b712f8f03610
+index 0000000000000000000000000000000000000000..ba363908360df8d1b1492e02fb45e072a21cd90d
 --- /dev/null
 +++ b/hw/usb4/usb4-fabric-int.h
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,712 @@
 +/*
 + * USB4 fabric - private definitions shared by the fabric source files
 + *
@@ -5726,8 +5727,11 @@ index 0000000000000000000000000000000000000000..69ffbc5daada87b8a346ad2f72c9b712
 + */
 +void usb4_icm_hotplug(USB4ICM *icm, USB4Router *r, unsigned adapter,
 +                      bool unplug);
-+/* Power-on / host router reset: the firmware re-enumerates the fabric. */
-+void usb4_icm_reset(USB4ICM *icm);
++/*
++ * Power-on / host router reset: the firmware re-enumerates the fabric.
++ * @wakeup: the machine's S3 wakeup reset (R34: saved devices restored).
++ */
++void usb4_icm_reset(USB4ICM *icm, bool wakeup);
 +
 +/* usb4-fabric-usb3.c: inputs of the USB3 Gen X tunnel of router @r */
 +void usb4_fabric_usb3_inputs(USB4Router *r, USB4TunnelInputs *in,
@@ -5822,7 +5826,7 @@ index 0000000000000000000000000000000000000000..ed7a7352dd7566835d05a69e004538ef
 +}
 diff --git a/hw/usb4/usb4-fabric.c b/hw/usb4/usb4-fabric.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868dbfda3ee
+index 0000000000000000000000000000000000000000..a14793f2bcc1a66414cea264ffca17862f91ec50
 --- /dev/null
 +++ b/hw/usb4/usb4-fabric.c
 @@ -0,0 +1,1569 @@
@@ -7010,7 +7014,7 @@ index 0000000000000000000000000000000000000000..f9aeca71540c0ecb626777ba31ad2868
 +        }
 +    }
 +    if (f->icm) {
-+        usb4_icm_reset(f->icm);
++        usb4_icm_reset(f->icm, wakeup);
 +    }
 +    /* preos-cm: the platform firmware's CM runs again after power-on */
 +    f->preos_window = f->cfg.preos_cm;
@@ -13085,10 +13089,10 @@ index 0000000000000000000000000000000000000000..aa6112c5da3bb6a59be8288ece6b3881
 +type_init(usb4_host_register_types)
 diff --git a/hw/usb4/usb4-icm.c b/hw/usb4/usb4-icm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b35355c6f9ea
+index 0000000000000000000000000000000000000000..1faed0c8f5a3a5254b993b64d7415cf3a0495cdb
 --- /dev/null
 +++ b/hw/usb4/usb4-icm.c
-@@ -0,0 +1,1296 @@
+@@ -0,0 +1,1368 @@
 +/*
 + * Emulated Intel Alpine Ridge / Titan Ridge firmware connection manager
 + * ("ICM")
@@ -13184,6 +13188,11 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +    bool usb4;          /* USB4 device router, not TB3 (13.3) */
 +    bool single_lane;   /* announced as one lane (13.3) */
 +    uint8_t conn_id;    /* id of the last announcement */
++    /*
++     * Saved by mailbox 0x05 and kept across the suspend: the next
++     * announcement carries connection id 0 and no boot bit (R34).
++     */
++    bool restored;
 +    uint8_t link;       /* host lane adapter number (= route, R9) */
 +    uint64_t route;     /* route string of the device router (TR T4) */
 +    /*
@@ -13225,6 +13234,13 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +    ICMPort port[USB4_MAX_PORTS + 1];
 +    ICMFallback fb[USB4_MAX_PORTS + 1];
 +    uint32_t acl[2 * ICM_ACL_SLOTS];
++    /*
++     * R34: devices saved by mailbox 0x05 (system suspend), by UUID; an
++     * S3 wakeup reset tunnels them again before the OS resumes.
++     */
++    bool saved[USB4_MAX_PORTS + 1];
++    uint8_t saved_uuid[USB4_MAX_PORTS + 1][16];
++    bool wakeup;        /* inside an S3 wakeup reset */
 +};
 +
 +/* ------------------------------------------------------------------ */
@@ -13509,7 +13525,19 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +    if (!dr || !icm->driver_ready) {
 +        return;
 +    }
-+    ip->conn_id = icm_next_id(icm);
++    if (ip->restored) {
++        /*
++         * R34: after a suspend with mailbox 0x05 the firmware announces
++         * a saved device with connection id 0 and the boot bit clear,
++         * approved (S3b-T:206.870 after s2idle, S3b-T:228.950 after S3,
++         * 0x09110010; captures/P14S-SUSPEND-2026-10-23.md 10.2).
++         */
++        ip->restored = false;
++        ip->boot = false;
++        ip->conn_id = 0;
++    } else {
++        ip->conn_id = icm_next_id(icm);
++    }
 +    ip->announced = true;
 +    info = LINK_INFO(ip->link, 1) | LINK_BIT11 |
 +           (ip->approved ? LINK_APPROVED : 0) |
@@ -13759,6 +13787,20 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +         */
 +        ip->single_lane = ip->usb4 && icm->cfg.bios_assist && ip->approved;
 +    }
++    if (!ip->approved && icm->wakeup && icm->saved[p] &&
++        !memcmp(icm->saved_uuid[p], ip->uuid, sizeof(ip->uuid))) {
++        /*
++         * R34: S3 removed the controller's power; on resume the firmware
++         * tunnels the device it saved before the OS's driver ready (the
++         * NVMe answered 0.6 s before it, S3b-D:227.696). The PCIe tunnel
++         * is rebuilt within the wakeup reset, so the endpoint never sees
++         * it go down.
++         */
++        ip->approved = icm_tunnel_up(icm, p);
++        ip->restored = ip->approved;
++        trace_usb4_icm_state(p, ip->approved ? "saved device restored"
++                                             : "saved device restore failed");
++    }
 +    if (!ip->approved && icm_falls_back(icm, dr)) {
 +        /* R33: approve within the window or lose the device to USB */
 +        usb4_timer_mod_ms(icm->fb[p].timer, icm->cfg.usb_fallback_ms);
@@ -13781,6 +13823,7 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +    ip->gen = ++icm->gen;       /* a pending approve no longer applies */
 +    ip->approved = false;       /* re-plug needs a new approve, 7 */
 +    ip->boot = false;
++    icm->saved[p] = false;      /* R34: a re-plug is not restored */
 +    trace_usb4_icm_state(p, "device router gone");
 +}
 +
@@ -13846,16 +13889,24 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +    return true;
 +}
 +
-+void usb4_icm_reset(USB4ICM *icm)
++void usb4_icm_reset(USB4ICM *icm, bool wakeup)
 +{
 +    uint32_t v = 1u << 31;
 +
 +    trace_usb4_icm_reset();
 +    /*
 +     * A machine reset is a power-on of the controller (R25); a power-up
-+     * of the controller alone (R27) is not.
++     * of the controller alone (R27) is not. Neither is the S3 wakeup
++     * (R34): no pre-boot window (the pre-boot ORICO came back with the
++     * boot bit clear, S3b-T:228.950), no return of a USB-mode device to
++     * its USB4 link (the 07:28 run's USB disk stayed on the xHCI); the
++     * devices saved by mailbox 0x05 are tunnelled again instead.
 +     */
-+    icm->power_on = !icm->next_reset_hot;
++    icm->power_on = !icm->next_reset_hot && !wakeup;
++    icm->wakeup = wakeup;
++    if (!wakeup) {
++        memset(icm->saved, 0, sizeof(icm->saved));
++    }
 +    icm->next_reset_hot = false;
 +    icm->driver_ready = false;
 +    usb4_timer_del(icm->ready_timer);
@@ -13906,6 +13957,8 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +    usb4_fabric_hp_enumerated(icm->f->hr);
 +    /* The pre-boot window closes with the power-on reset (R25). */
 +    icm->power_on = false;
++    icm->wakeup = false;
++    memset(icm->saved, 0, sizeof(icm->saved));
 +}
 +
 +/* ------------------------------------------------------------------ */
@@ -13980,6 +14033,8 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +
 +    /* R8, R12: then announce every attached router, in adapter order. */
 +    icm->driver_ready = true;
++    /* R34: a save not followed by an S3 wakeup (s2idle) ends here */
++    memset(icm->saved, 0, sizeof(icm->saved));
 +    for (unsigned p = 1; p <= USB4_MAX_PORTS; p++) {
 +        icm->port[p].announced = false;
 +    }
@@ -14318,11 +14373,32 @@ index 0000000000000000000000000000000000000000..9425ca04ae7dd005401b4316c3a5b353
 +            icm_tunnel_down(icm, p);
 +            icm->port[p].approved = false;
 +            icm->port[p].boot = false;
++            icm->port[p].restored = false;
++            icm->saved[p] = false;
 +            /* an approve in progress must not rebuild the tunnel */
 +            icm->port[p].gen = ++icm->gen;
 +        }
 +        break;
 +    case ICM_MBOX_SAVE_DEVICES:
++        /*
++         * R34 (Alpine Ridge; Linux sends it before 0x07 at system
++         * suspend): remember the approved devices. Across s2idle they
++         * keep their tunnel and are re-announced with connection id 0
++         * and no boot bit; across S3 they are tunnelled again at the
++         * wakeup (captures/P14S-SUSPEND-2026-10-23.md 10). Titan Ridge
++         * and Ice Lake keep the plain completion (not captured).
++         */
++        if (icm_tr(icm)) {
++            break;
++        }
++        for (unsigned p = 1; p <= icm->f->hr->nports; p++) {
++            ICMPort *ip = &icm->port[p];
++
++            icm->saved[p] = ip->present && ip->approved;
++            ip->restored = icm->saved[p];
++            memcpy(icm->saved_uuid[p], ip->uuid, sizeof(ip->uuid));
++        }
++        break;
 +    case ICM_MBOX_ALLOW_ALL:
 +    case ICM_MBOX_DISCONNECT_PA:
 +    case ICM_MBOX_DISCONNECT_PB:
@@ -32057,10 +32133,10 @@ index 0000000000000000000000000000000000000000..3d77c572bbc2512f5f79d78e72f14cf0
 +}
 diff --git a/tests/qtest/usb4-icm-test.c b/tests/qtest/usb4-icm-test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..44a01a0e45ff736c93c1d2cb92ce44c3cc8f3000
+index 0000000000000000000000000000000000000000..584b18dfb9383db6489d8fb0637fc31582308d5d
 --- /dev/null
 +++ b/tests/qtest/usb4-icm-test.c
-@@ -0,0 +1,2296 @@
+@@ -0,0 +1,2429 @@
 +/*
 + * QTest for the tb3-alpine-ridge profile of usb4-host and its emulated
 + * firmware connection manager (ICM)
@@ -34322,6 +34398,138 @@ index 0000000000000000000000000000000000000000..44a01a0e45ff736c93c1d2cb92ce44c3
 +    qtest_quit(qts);
 +}
 +
++/*
++ * R34, the P14s 07:45 run (captures/P14S-SUSPEND-2026-10-23.md 10): the
++ * Linux client's system suspend is rings stopped, mailbox 0x05 (save
++ * devices), 0x07; the resume is driver ready. Across s2idle (no reset)
++ * the tunnel stays up and the saved device is re-announced approved with
++ * connection id 0 and the boot bit clear (0x09110010, S3b-T:206.870).
++ * Across S3 the controller loses power (the machine's wakeup reset): the
++ * firmware tunnels the saved device again within the reset, so the
++ * endpoint is kept, and announces it as after s2idle (S3b-T:228.950).
++ */
++#define PMBASE              0x600
++
++static void s3_cycle(QTestState *qts)
++{
++    /* ACPI S3 through the ICH9 PM1 control register, then the wakeup */
++    cfg_wr(qts, 0, QPCI_DEVFN(0x1f, 0), 0x40, PMBASE | 1);
++    cfg_wr(qts, 0, QPCI_DEVFN(0x1f, 0), 0x44, 0x80);
++    qtest_outw(qts, PMBASE + 4, (1u << 10) | (1u << 13));
++    qtest_qmp_eventwait(qts, "SUSPEND");
++    qtest_qmp_assert_success(qts, "{'execute': 'system_wakeup'}");
++    qtest_qmp_eventwait(qts, "WAKEUP");
++}
++
++/* The client's system suspend: rings off, 0x05 if @save, then 0x07. */
++static void client_suspend(T *t, bool save)
++{
++    rings_stop(t);
++    if (save) {
++        g_assert_cmphex(mailbox(t, 0x05), ==, 0x05);
++    }
++    g_assert_cmphex(mailbox(t, 0x07), ==, 0x07);
++}
++
++/* After the wakeup reset: the NHI's BARs and Command are back to 0. */
++static void nhi_remap(T *t)
++{
++    qpci_device_enable(t->dev);
++    qpci_iounmap(t->dev, t->bar);
++    t->bar = qpci_iomap(t->dev, 0, NULL);
++    t->tx_pi = t->rx_ci = t->rx_next = 0;
++}
++
++/* Bind and expect the device announced as given; returns word 5. */
++static uint32_t bind_announced(T *t, bool approved, uint32_t *uuid)
++{
++    uint32_t w[64];
++    unsigned n;
++
++    icm_bind(t, w);
++    n = icm_expect(t, PDF_ICM_EVENT, w);
++    check_connected(w, n, approved, false, uuid);
++    icm_expect_none(t);
++    return w[5];
++}
++
++static void test_save_devices(void)
++{
++    uint32_t uuid[4], uuid2[4], cmd[6], w[64];
++    g_autofree char *ep = NULL, *ep2 = NULL;
++    T *t = t_start(",preboot=on", true);
++
++    /* pre-boot tunnel: approved, boot bit, a fresh connection id */
++    g_assert_true(gate_opens(t->qts));
++    ep = endpoint_state(t->qts);
++    g_assert_cmphex(bind_announced(t, true, uuid) >> 16, ==, 0x0d11);
++
++    /* s2idle: no reset; approved, id 0, boot clear, tunnel kept */
++    client_suspend(t, true);
++    g_assert_true(gate_open(t->qts));
++    g_assert_cmphex(bind_announced(t, true, uuid2), ==, 0x09110010);
++    g_assert_cmpmem(uuid2, 16, uuid, 16);
++    ep2 = endpoint_state(t->qts);
++    g_assert_cmpstr(ep2, ==, ep);
++
++    /* S3: the wakeup reset; tunnelled again in it, the endpoint kept */
++    client_suspend(t, true);
++    s3_cycle(t->qts);
++    nhi_remap(t);
++    g_assert_cmphex(rd(t, OUTMAIL), ==, 0x800003f0);
++    g_assert_true(gate_open(t->qts));
++    g_free(ep2);
++    ep2 = endpoint_state(t->qts);
++    g_assert_cmpstr(ep2, ==, ep);
++    g_assert_cmphex(bind_announced(t, true, uuid2), ==, 0x09110010);
++    g_assert_cmpmem(uuid2, 16, uuid, 16);
++
++    /* a second S3 without 0x05: no restore, a new approve is needed */
++    client_suspend(t, false);
++    s3_cycle(t->qts);
++    nhi_remap(t);
++    g_assert_false(gate_open(t->qts));
++    /* R25: with pre-boot support on every announcement has the boot bit */
++    g_assert_cmphex(bind_announced(t, false, uuid2) >> 16, ==, 0x0c11);
++    t_stop(t);
++
++    /* no pre-boot: approved by the client, then S3 with the save */
++    t = t_start(NULL, true);
++    icm_bind(t, w);
++    {
++        unsigned n = icm_expect(t, PDF_ICM_EVENT, w);
++        unsigned id = check_connected(w, n, false, false, uuid);
++
++        cmd[0] = 0x00000004;
++        memcpy(&cmd[1], uuid, 16);
++        cmd[5] = 0x10 | (id << 8);
++        icm_cmd(t, cmd, 6);
++        g_assert_cmpuint(icm_expect(t, PDF_ICM_RESP, w), ==, 6);
++        g_assert_cmphex(w[0], ==, 0x01000004);
++    }
++    wait_stage(t->qts, "inserted");
++    g_assert_true(gate_open(t->qts));
++    g_free(ep);
++    ep = endpoint_state(t->qts);
++    client_suspend(t, true);
++    s3_cycle(t->qts);
++    nhi_remap(t);
++    g_assert_true(gate_open(t->qts));
++    g_free(ep2);
++    ep2 = endpoint_state(t->qts);
++    g_assert_cmpstr(ep2, ==, ep);
++    g_assert_cmphex(bind_announced(t, true, uuid2), ==, 0x09110010);
++
++    /* a cold reset forgets the save: no pre-boot, so not approved */
++    client_suspend(t, true);
++    qtest_qmp_assert_success(t->qts, "{'execute': 'system_reset'}");
++    qtest_qmp_eventwait(t->qts, "RESET");
++    nhi_remap(t);
++    g_assert_cmphex(bind_announced(t, false, uuid2) >> 16, ==, 0x0811);
++    g_assert_false(gate_open(t->qts));
++    t_stop(t);
++}
++
 +int main(int argc, char **argv)
 +{
 +    g_test_init(&argc, &argv, NULL);
@@ -34353,6 +34561,7 @@ index 0000000000000000000000000000000000000000..44a01a0e45ff736c93c1d2cb92ce44c3
 +    qtest_add_func("/usb4-icm/approve-timing", test_approve_timing);
 +    qtest_add_func("/usb4-icm/preboot-order", test_preboot_order);
 +    qtest_add_func("/usb4-icm/preboot-reset", test_preboot_reset);
++    qtest_add_func("/usb4-icm/save-devices", test_save_devices);
 +    qtest_add_func("/usb4-icm/reset-pending-removal",
 +                   test_reset_pending_removal);
 +    return g_test_run();

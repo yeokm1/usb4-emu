@@ -128,7 +128,7 @@ minimal host router and send no driver-ready; any value other than 0 or 3 aborts
 
 | Code | Command | Data | When the Alpine Ridge client sends it | Evidence |
 |---|---|---|---|---|
-| 0x05 | save devices | 0 | system suspend, before 0x07 | [inf]; the 2026-10-23 s2idle (§14) shows the suspend and resume around it but not the command, which is neither traced nor logged |
+| 0x05 | save devices | 0 | system suspend, before 0x07 | [inf] for the command itself (neither traced nor logged); its effect is [obs]: the saved device keeps or regains its tunnel across s2idle and S3 and is re-announced approved with connection id 0 (§14, R34) |
 | 0x06 | disconnect PCIe paths | 0 | teardown of all PCIe tunnels by the client (host NVM upgrade path) | [inf] |
 | 0x07 | driver unloads | 0 | driver unbind, system suspend, runtime suspend | [obs] `M:2-unbound` after unbind; `M:1-initial` and `M:5-plugged` after runtime suspends |
 | 0x10 / 0x11 | disconnect port A / B paths | 1, then 2 | tearing down a host-to-host DMA tunnel | [inf], out of scope |
@@ -931,6 +931,24 @@ Added after the P14s ORICO session (§13, 2026-10-15):
   it unassigned) [obs] §13.1 R3, W98 A1P0_OR; otherwise the xHCI is hidden and the NHI
   shown (R30). A fallback at run time under Assist keeps the NHI and the hidden xHCI
   [inf, not captured].
+- **R34** System suspend (2026-10-23, captures/P14S-SUSPEND-2026-10-23.md §10). Mailbox
+  0x05 "save devices" remembers every present, approved device router by UUID (the
+  command itself is [inf], the client sends it before 0x07; its effect is [obs]):
+  - without a reset (s2idle) the tunnel stays up, and the next driver ready announces
+    the saved device approved with **connection id 0** and the **boot bit clear**
+    (`0x09110010`) [obs] S3b-T:206.870;
+  - the machine's S3 wakeup reset is not a power-on for R25 or R33 (no pre-boot
+    approval, a USB-mode device stays on USB) [obs: boot bit clear after S3 with pre-boot
+    on, S3b-T:228.950; the 07:28 run's USB disk kept]; within that reset the firmware
+    tunnels each saved device again that is still attached with the same UUID, so the
+    tunnel never goes down for the endpoint and the NVMe is kept, and announces it as
+    after s2idle [obs: the NVMe answered 0.6 s before driver ready, S3b-D:227.696; no
+    pciehp event, no re-enumeration];
+  - a save is consumed by the next driver ready and forgotten at a cold reset, an unplug
+    or mailbox 0x06; an S3 wakeup without a save tunnels nothing (the device is
+    announced unapproved, as before 2026-10-23) [inf: Linux always saves first].
+  Alpine Ridge only; Titan Ridge and Ice Lake keep 0x05 as a plain completion (not
+  captured). Qtest `/usb4-icm/save-devices`.
 
 ## 9. Open questions: status after the Windows 11, Windows 98 and Assist-on captures
 
@@ -1257,7 +1275,9 @@ across s2idle and S3 remains uncaptured.
   hub lost power"), the outbound mailbox read its power-on `0x800003f0` again, the
   firmware CM answered the post-resume driver ready with the same words, and the boot
   ACL kept its entries [obs].
-- Model: unchanged (the s2idle path is the runtime-suspend path plus 0x05, all already
-  modelled; the router reset is invisible with nothing attached; QEMU's S3 wakeup reset
-  already restores `0x800003f0` and keeps the ACL). Next: the same runs with a tunnel
-  (pre-boot on), captures/P14S-SUSPEND-2026-10-23.md §9.
+- With a tunnel (third run, 07:45, pre-boot on): the tunnel and the NVMe survived s2idle
+  and S3; after each resume the ORICO was re-announced approved with connection id 0 and
+  the boot bit clear; after S3 the NVMe answered before the driver ready, so the
+  firmware rebuilt the tunnel itself [obs] (captures/P14S-SUSPEND-2026-10-23.md §10).
+- Model: R34 (2026-10-23). Before it the model lost the tunnel at the S3 wakeup reset and
+  re-announced the device unapproved.
