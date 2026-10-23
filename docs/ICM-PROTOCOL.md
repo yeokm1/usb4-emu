@@ -640,10 +640,9 @@ DMA port (adapter 3 / 5 typed NHI and its mailbox reads and writes, deliberately
 absent, R18, R20); router dwords 6 and 0x64 (they change on their own on the hardware, unmodelled);
 and every Router CS write reply: the hardware answers a write with Adapter Num 0 and
 only reads with the upstream adapter (`0x0400202c` against the model's `0x0418202c` /
-`0x0408202c`), as the captured software-CM routers do. The model applies that rule to
-`img` and software-CM routers only (`usb4-fabric.c`); extending it to tb3 routers under
-the firmware CM is owed (2026-10-22: left alone because another branch was changing that
-file). The debugfs dumps also read vendor-specific router dwords from 0x400 to 0xfff
+`0x0408202c`), as the captured software-CM routers do. Since QEMU `51d078a` the model
+applies that rule to every tb3 router (`usb4-fabric.c`): reply headers 388 of 388 on the
+host and 6,244 of 6,244 on the dock, client only. The debugfs dumps also read vendor-specific router dwords from 0x400 to 0xfff
 and a longer link-controller chain (dword 0x100 `0x02140400`), which the model answers
 with error 2 or ends early under the firmware CM; no CM reads them.
 

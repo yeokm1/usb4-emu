@@ -189,7 +189,12 @@ pciehp's 5 s attention-button window of an eject of the old endpoint (`tunnel=ej
 then `tunnel=up` at once with pciehp bound): the old eject's power-off lands on the new
 endpoint (gen 8) and removes it. Real hardware would keep the card present and powered
 off. The exit's "one fresh endpoint" holds with an ignoring guest, not with this Linux
-timing. Changing it is in `usb4-tunnel-slot.c`, which the link-retrain branch is
+timing. Fixed in QEMU `51d078a` (2026-10-23): the slot is no longer dismissed for a
+guest power-off; rechecked on q35 with the same kit: `tunnel=eject` then at once
+`tunnel=up` with pciehp bound ends with "live gen=6", pciehp "Card present", the NVMe
+and the same data; pcieport unbound, `tunnel=surprise`/`up`, rebind: "live gen=10", the
+NVMe and the same data. (Before the fix:) Changing it is in `usb4-tunnel-slot.c`, which
+the link-retrain branch is
 changing; not touched here.
 
 i440FX, `usb4-tunnel-bridge` (no SHPC driver: Linux's shpchp cannot get control

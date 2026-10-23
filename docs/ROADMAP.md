@@ -130,7 +130,8 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
   captured; dock 2,265 of 2,514 read dwords as captured (90.1%), host 199 of 294
   (67.7%), writes 4,172 of 4,181. The differences are the DROM and host UID contents
   (emulator identity), the DMA port (deliberately absent, R20), two counter dwords and
-  the Adapter Num of Router CS write replies (owed, §5.6). The replay found and fixed
+  nothing else: Router CS write replies carry Adapter Num 0 since QEMU `51d078a`, reply
+  headers 6,632 of 6,632. The replay found and fixed
   the EEPROM control dword read-back while bit-banging (§5.4). Also: qtests
   `usb4-icm-test`, `usb4-tb3dev-test` and the fabric harness `test_tb3_*`; the M2 Linux
   exit.
@@ -253,11 +254,11 @@ path of a profile exists, so Linux binding is an exit criterion of M2 and M4, no
     i440FX, boot-present and hot-added.
   - [x] i440FX: gated in Disabled and Power-only, reachable after the guest enables the
     slot by SHPC writes; removal and replacement with this driverless guest.
-  - [ ] Open, owner question: with Linux's pciehp the model treats the guest's slot
-    power-off of a present endpoint as an eject and dismisses it, so a reconnect inside
-    pciehp's 5 s attention-button window of the old eject loses the new endpoint until
-    the next tunnel cycle, and a pciehp rebind on a slot reading powered off removes it
-    (`usb4-tunnel-slot.c`, left for after link-retrain).
+  - [x] Fixed in QEMU `51d078a` and rechecked on Linux 2026-10-23: a guest slot
+    power-off of a present endpoint no longer dismisses the slot; the replacement comes
+    back gated by the persisted power-off. A reconnect inside pciehp's 5 s
+    attention-button window of the old eject, and a pciehp rebind on a slot reading
+    powered off, both end with the NVMe present and the same data.
   - DMA and MSI blocked by the gate address space rather than the Command register stay
     qtest-verified (`usb4-tunnel-test`); the guest only shows that I/O stops.
   - [ ] Windows: owed (the Intel package, now pinned).
